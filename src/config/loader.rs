@@ -101,25 +101,25 @@ impl ConfigLoader {
         }
 
         // Load and merge user allowlist
-        if let Ok(allowlist) = self.load_user_allowlist() {
-            if !allowlist.domains.allowed.is_empty() {
-                // Create a minimal config with only the allowlist domains - don't use
-                // Default which would add duplicate graylist entries
-                let allowlist_config = Config {
-                    general: config.general.clone(),
-                    gateway: config.gateway.clone(),
-                    sandbox: Default::default(),
-                    network: NetworkConfig {
-                        allowlist: allowlist.domains.allowed,
-                        blocklist: Vec::new(),
-                        graylist: Vec::new(),
-                        host_rewrite: Default::default(),
-                    },
-                    filesystem: Default::default(),
-                };
-                config.merge(allowlist_config);
-                debug!("Loaded user allowlist from {:?}", self.allowlist_path);
-            }
+        if let Ok(allowlist) = self.load_user_allowlist()
+            && !allowlist.domains.allowed.is_empty()
+        {
+            // Create a minimal config with only the allowlist domains - don't use
+            // Default which would add duplicate graylist entries
+            let allowlist_config = Config {
+                general: config.general.clone(),
+                gateway: config.gateway.clone(),
+                sandbox: Default::default(),
+                network: NetworkConfig {
+                    allowlist: allowlist.domains.allowed,
+                    blocklist: Vec::new(),
+                    graylist: Vec::new(),
+                    host_rewrite: Default::default(),
+                },
+                filesystem: Default::default(),
+            };
+            config.merge(allowlist_config);
+            debug!("Loaded user allowlist from {:?}", self.allowlist_path);
         }
 
         // Load and merge additional config file from CLI
@@ -190,11 +190,11 @@ impl ConfigLoader {
             .parent()
             .map(|p| p.join("profiles").join(format!("{}.toml", profile_name)));
 
-        if let Some(ref path) = user_profile_path {
-            if let Some(profile) = self.load_profile_file(path)? {
-                debug!("Loaded user profile from {:?}", path);
-                return Ok(profile);
-            }
+        if let Some(ref path) = user_profile_path
+            && let Some(profile) = self.load_profile_file(path)?
+        {
+            debug!("Loaded user profile from {:?}", path);
+            return Ok(profile);
         }
 
         // Try system profiles directory

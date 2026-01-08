@@ -33,7 +33,7 @@ fn default_gateway_url() -> String {
 }
 
 /// Top-level configuration structure.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Config {
     /// General settings.
     #[serde(default)]
@@ -54,18 +54,6 @@ pub struct Config {
     /// Filesystem policy settings.
     #[serde(default)]
     pub filesystem: FilesystemConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            general: GeneralConfig::default(),
-            gateway: GatewayConfig::default(),
-            sandbox: SandboxConfig::default(),
-            network: NetworkConfig::default(),
-            filesystem: FilesystemConfig::default(),
-        }
-    }
 }
 
 impl Config {

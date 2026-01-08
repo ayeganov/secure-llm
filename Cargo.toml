@@ -18,14 +18,19 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1.0.100"
-chrono = { version = "0.4.42", features = ["serde"] }
+chrono = { version = "0.4.42", features = ["clock", "serde"] }
 clap = { version = "4.5.54", features = ["derive", "env"] }
 dirs = "6.0.0"
+libc = "0.2.179"
+nix = { version = "0.30.1", features = ["net", "sched", "process", "fs", "user", "signal"] }
+rcgen = "0.14.6"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 shellexpand = "3.1.1"
 syslog = "7.0.0"
+tempfile = "3.24.0"
 thiserror = "2.0.17"
+time = "0.3.44"
 tokio = { version = "1.49.0", features = ["full"] }
 toml = "0.9.10"
 tracing = "0.1.44"
