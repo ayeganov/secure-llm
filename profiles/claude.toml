@@ -1,0 +1,28 @@
+# Tool profile for Claude Code (Anthropic's CLI for Claude)
+
+[tool]
+name = "claude"
+display_name = "Claude Code"
+binary = "claude"
+description = "Anthropic Claude Code CLI - AI-powered coding assistant"
+
+[environment]
+# Redirect Claude's API calls to corporate gateway
+ANTHROPIC_BASE_URL = "https://llm-gateway.corp/v1/anthropic"
+
+# Certificate configuration for TLS interception
+# ${SANDBOX_CA_CERT} is expanded at sandbox launch time to the ephemeral CA path
+SSL_CERT_FILE = "${SANDBOX_CA_CERT}"
+NODE_EXTRA_CA_CERTS = "${SANDBOX_CA_CERT}"
+REQUESTS_CA_BUNDLE = "${SANDBOX_CA_CERT}"
+
+[network]
+# Claude-specific domains that need to be allowed
+allowlist = [
+    "*.anthropic.com",
+    "statsig.anthropic.com",
+]
+
+[proxy.host_rewrite]
+# Redirect Claude API traffic to corporate gateway
+"api.anthropic.com" = "llm-gateway.corp/v1/anthropic"

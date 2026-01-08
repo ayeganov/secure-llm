@@ -1,0 +1,29 @@
+# Tool profile for Cursor IDE (AI-powered code editor)
+
+[tool]
+name = "cursor"
+display_name = "Cursor IDE"
+binary = "cursor"
+description = "Cursor - AI-first code editor built on VS Code"
+
+[environment]
+# Certificate configuration for TLS interception
+# ${SANDBOX_CA_CERT} is expanded at sandbox launch time to the ephemeral CA path
+SSL_CERT_FILE = "${SANDBOX_CA_CERT}"
+NODE_EXTRA_CA_CERTS = "${SANDBOX_CA_CERT}"
+
+# Cursor-specific API redirection
+CURSOR_API_URL = "https://llm-gateway.corp/v1/cursor"
+
+[network]
+# Cursor-specific domains that need to be allowed
+allowlist = [
+    "*.cursor.sh",
+    "cursor.sh",
+    "download.cursor.sh",
+]
+
+[proxy.host_rewrite]
+# Redirect Cursor API traffic to corporate gateway
+"api.cursor.sh" = "llm-gateway.corp/v1/cursor"
+"api2.cursor.sh" = "llm-gateway.corp/v1/cursor"

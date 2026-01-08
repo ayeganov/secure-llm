@@ -1,0 +1,44 @@
+[package]
+name = "secure-llm"
+version = "0.1.0"
+edition = "2024"
+description = "Security sandbox wrapper for agentic IDEs"
+license = "MIT"
+readme = "README.md"
+keywords = ["security", "sandbox", "ai", "ide", "llm"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "secure-llm"
+path = "src/main.rs"
+
+[lib]
+name = "secure_llm"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0.100"
+chrono = { version = "0.4.42", features = ["serde"] }
+clap = { version = "4.5.54", features = ["derive", "env"] }
+dirs = "6.0.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+shellexpand = "3.1.1"
+syslog = "7.0.0"
+thiserror = "2.0.17"
+tokio = { version = "1.49.0", features = ["full"] }
+toml = "0.9.10"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }
+uuid = { version = "1.19.0", features = ["v4", "serde"] }
+
+[dev-dependencies]
+assert_cmd = "2.1.1"
+predicates = "3.1.3"
+tempfile = "3.24.0"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

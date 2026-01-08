@@ -1,0 +1,18 @@
+# Configuration for static binary compilation using musl
+# This produces a fully static binary with no external runtime dependencies
+
+[target.x86_64-unknown-linux-musl]
+# Use musl-gcc as the linker for static linking
+linker = "musl-gcc"
+
+# Enable static linking for all native libraries
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[build]
+# Default target for release builds (can be overridden with --target)
+# Uncomment the line below to make musl the default target
+# target = "x86_64-unknown-linux-musl"
+
+[alias]
+# Convenient alias for building a static release binary
+release-static = "build --release --target x86_64-unknown-linux-musl"
