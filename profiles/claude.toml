@@ -9,6 +9,15 @@ description = "Anthropic Claude Code CLI - AI-powered coding assistant"
 [environment]
 # Redirect Claude's API calls to corporate gateway
 ANTHROPIC_BASE_URL = "https://llm-gateway.corp/v1/anthropic"
+ANTHROPIC_BEDROCK_BASE_URL="https://llm-proxy.us-east-2.ops.infra.intelligence.webex.com/bedrock/v1"
+
+# Proxy configuration for network traffic
+# ${SANDBOX_PROXY} is expanded at sandbox launch time to http://127.0.0.1:8080
+# (where the internal shim listens, bridging to the host proxy via Unix socket)
+HTTP_PROXY = "${SANDBOX_PROXY}"
+HTTPS_PROXY = "${SANDBOX_PROXY}"
+http_proxy = "${SANDBOX_PROXY}"
+https_proxy = "${SANDBOX_PROXY}"
 
 # Certificate configuration for TLS interception
 # ${SANDBOX_CA_CERT} is expanded at sandbox launch time to the ephemeral CA path

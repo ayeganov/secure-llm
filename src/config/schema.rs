@@ -279,6 +279,24 @@ pub struct FilesystemConfig {
     /// Paths to allow (still subject to mount source check).
     #[serde(default)]
     pub allowed_paths: Vec<PathBuf>,
+
+    /// Directories to bind mount read-only into the sandbox.
+    ///
+    /// These paths will be mounted at the same location inside the sandbox.
+    /// Use for directories the tool needs to read but not modify.
+    ///
+    /// Example: `["/opt/tools", "/usr/local/share"]`
+    #[serde(default)]
+    pub bind_ro: Vec<PathBuf>,
+
+    /// Directories to bind mount read-write into the sandbox.
+    ///
+    /// These paths will be mounted at the same location inside the sandbox.
+    /// Use for directories the tool needs to read and write.
+    ///
+    /// Example: `["/home/user/.cache/pip"]`
+    #[serde(default)]
+    pub bind_rw: Vec<PathBuf>,
 }
 
 impl FilesystemConfig {
@@ -286,6 +304,8 @@ impl FilesystemConfig {
         // Lists are merged (appended)
         self.denylist.extend(other.denylist);
         self.allowed_paths.extend(other.allowed_paths);
+        self.bind_ro.extend(other.bind_ro);
+        self.bind_rw.extend(other.bind_rw);
     }
 }
 

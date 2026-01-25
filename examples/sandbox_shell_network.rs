@@ -1,34 +1,63 @@
 //! Launch an interactive shell inside the sandbox WITH network access.
 //!
-//! Usage (requires root for network namespace):
-//!   sudo -E cargo run --example sandbox_shell_network
-//!   sudo -E cargo run --example sandbox_shell_network -- /path/to/workdir
+//! This example demonstrates the rootless socket shim architecture:
+//! - NO sudo/root required
+//! - NO veth pairs or network namespaces with `ip` commands
+//! - Proxy listens on Unix socket, bind-mounted into sandbox
+//! - Egress shim inside sandbox forwards TCP to Unix socket
 //!
-//! This creates a full network namespace with veth pairs, letting you test:
-//! - Network connectivity through the veth pair
-//! - DNS resolution with synthetic resolv.conf
-//! - Proxy environment variables (HTTP_PROXY, HTTPS_PROXY)
+//! Usage:
+//!   cargo run --example sandbox_shell_network
+//!   cargo run --example sandbox_shell_network -- /path/to/workdir
 //!
-//! Note: This does NOT start an actual proxy - it just sets up the network
-//! namespace and environment. Traffic to the proxy address will fail unless
-//! you run a proxy on the host.
+//! Architecture:
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │                    Sandbox (rootless)                       │
+//! │                                                             │
+//! │   ┌──────────────┐         ┌───────────────────────────┐   │
+//! │   │  bash        │ HTTP    │     EgressShim            │   │
+//! │   │  curl, etc   │ PROXY   │  TCP 127.0.0.1:8080       │   │
+//! │   │              │────────►│         │                 │   │
+//! │   └──────────────┘         │         ▼                 │   │
+//! │                            │  /tmp/proxy.sock ─────────┼───┼──┐
+//! │                            └───────────────────────────┘   │  │
+//! └─────────────────────────────────────────────────────────────┘  │
+//!                                                                  │
+//! ┌────────────────────────────────────────────────────────────────┼──┐
+//! │                     Host                                       │  │
+//! │                                                                │  │
+//! │   ┌───────────────────────────────────────────────────────┐    │  │
+//! │   │               ProxyServer                             │◄───┘  │
+//! │   │           Unix Socket Listener                        │       │
+//! │   │        /tmp/secure-llm/proxy.sock                     │       │
+//! │   │                    │                                  │       │
+//! │   │                    ▼                                  │       │
+//! │   │              (to internet)                            │       │
+//! │   └───────────────────────────────────────────────────────┘       │
+//! └────────────────────────────────────────────────────────────────────┘
+//! ```
 
+use secure_llm::config::NetworkConfig;
+use secure_llm::proxy::{PolicyEngine, ProxyConfig, ProxyServer};
 use secure_llm::sandbox::bwrap::BwrapBuilder;
-use secure_llm::sandbox::ca::{EphemeralCa, find_host_ca_bundle};
-use secure_llm::sandbox::netns::{NetnsConfig, NetworkNamespace};
-use std::path::Path;
-use std::process::{Command, ExitCode};
+use secure_llm::sandbox::ca::{find_host_ca_bundle, EphemeralCa};
+use secure_llm::telemetry::AuditLogger;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::watch;
 
-fn main() -> ExitCode {
-    // Check if running as root
-    //    let euid = unsafe { libc::geteuid() };
-    //    if euid != 0 {
-    //        eprintln!("Error: This example requires root for network namespace creation.");
-    //        eprintln!();
-    //        eprintln!("Run with:");
-    //        eprintln!("  sudo -E cargo run --example sandbox_shell_network");
-    //        return ExitCode::from(1);
-    //    }
+#[tokio::main]
+async fn main() -> std::process::ExitCode {
+    // Initialize tracing for debug output
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("secure_llm=debug".parse().unwrap())
+                .add_directive("hyper=info".parse().unwrap()),
+        )
+        .init();
 
     let work_dir = std::env::args().nth(1).unwrap_or_else(|| {
         std::env::current_dir()
@@ -41,48 +70,31 @@ fn main() -> ExitCode {
 
     if !work_dir.exists() {
         eprintln!("Error: Work directory does not exist: {:?}", work_dir);
-        return ExitCode::from(1);
+        return std::process::ExitCode::from(1);
     }
 
-    println!("=== Sandbox Shell (with Network) ===");
+    println!("=== Sandbox Shell (Rootless Network via Socket Shim) ===");
     println!("Work directory: {:?}", work_dir);
     println!();
 
-    // Create network namespace
-    println!("Creating network namespace...");
-    let netns_config = NetnsConfig::default();
-    let netns = match NetworkNamespace::create(netns_config) {
-        Ok(ns) => ns,
-        Err(e) => {
-            eprintln!("Failed to create network namespace: {}", e);
-            return ExitCode::from(1);
-        }
-    };
-
-    println!("  Network namespace: {}", netns.name);
-    println!("  Host IP (proxy):   {}", netns.host_ip);
-    println!("  Sandbox IP:        {}", netns.sandbox_ip);
-    println!("  Proxy URL:         {}", netns.proxy_url());
-    println!();
-
-    // Generate ephemeral CA
+    // Generate ephemeral CA for TLS interception
     println!("Generating ephemeral CA certificate...");
     let ca = match EphemeralCa::generate() {
-        Ok(ca) => ca,
+        Ok(ca) => Arc::new(ca),
         Err(e) => {
             eprintln!("Failed to generate CA: {}", e);
-            return ExitCode::from(1);
+            return std::process::ExitCode::from(1);
         }
     };
 
-    // Create combined CA bundle
+    // Create combined CA bundle (host CAs + our ephemeral CA)
     let ca_bundle = if let Some(host_bundle) = find_host_ca_bundle() {
         println!("  Using host CA bundle: {:?}", host_bundle);
         match ca.create_combined_bundle(host_bundle) {
             Ok(bundle) => bundle,
             Err(e) => {
                 eprintln!("Failed to create CA bundle: {}", e);
-                return ExitCode::from(1);
+                return std::process::ExitCode::from(1);
             }
         }
     } else {
@@ -94,63 +106,157 @@ fn main() -> ExitCode {
     println!("  Ephemeral CA: {:?}", ca.cert_path());
     println!();
 
+    // Create policy engine with allowlist
+    println!("Setting up policy engine...");
+    let network_config = NetworkConfig {
+        allowlist: vec![
+            // Common package registries
+            "pypi.org".to_string(),
+            "*.pypi.org".to_string(),
+            "files.pythonhosted.org".to_string(),
+            "registry.npmjs.org".to_string(),
+            "crates.io".to_string(),
+            "*.crates.io".to_string(),
+            "static.crates.io".to_string(),
+            // GitHub
+            "github.com".to_string(),
+            "*.github.com".to_string(),
+            "api.github.com".to_string(),
+            // Anthropic
+            "api.anthropic.com".to_string(),
+            "*.anthropic.com".to_string(),
+            // OpenAI
+            "api.openai.com".to_string(),
+            // General utilities for testing
+            "example.com".to_string(),
+            "www.example.com".to_string(),
+            "httpbin.org".to_string(),
+            "ifconfig.me".to_string(),
+        ],
+        blocklist: vec![
+            "malware.example.com".to_string(),
+        ],
+        graylist: vec![
+            "raw.githubusercontent.com".to_string(),
+        ],
+        host_rewrite: Default::default(),
+    };
+
+    let cli_allow: Vec<String> = vec![];
+    let policy = Arc::new(PolicyEngine::from_config(&network_config, &cli_allow));
+    println!("  Allowlist: {} domains", network_config.allowlist.len());
+    println!("  Blocklist: {} domains", network_config.blocklist.len());
+    println!("  Graylist: {} domains", network_config.graylist.len());
+    println!();
+
+    // Create audit logger (null logger for example)
+    let audit = Arc::new(AuditLogger::new_null());
+
+    // Create shutdown channel
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    // Setup Unix socket for proxy
+    let socket_dir = PathBuf::from("/tmp/secure-llm");
+    if let Err(e) = std::fs::create_dir_all(&socket_dir) {
+        eprintln!("Failed to create socket directory: {}", e);
+        return std::process::ExitCode::from(1);
+    }
+    let socket_path = socket_dir.join("proxy.sock");
+
+    // Remove stale socket if exists
+    let _ = std::fs::remove_file(&socket_path);
+
+    let proxy_config = ProxyConfig {
+        listen_path: socket_path.clone(),
+        ca: ca.clone(),
+        policy: policy.clone(),
+        headless: true, // Block unknown domains (no TUI in this example)
+        prompt_timeout: Duration::from_secs(30),
+        audit,
+    };
+
+    // Start the proxy server
+    println!("Starting proxy server...");
+    println!("  Socket: {:?}", socket_path);
+    let proxy_server = ProxyServer::new(proxy_config, shutdown_rx);
+    let proxy_handle = tokio::spawn(async move {
+        if let Err(e) = proxy_server.run().await {
+            eprintln!("Proxy server error: {}", e);
+        }
+    });
+
+    // Give the proxy a moment to start
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    println!("  Proxy server started!");
+    println!();
+
+    // Get the path to our own binary (for the shim)
+    let self_exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("Failed to get current executable path: {}", e);
+            return std::process::ExitCode::from(1);
+        }
+    };
+
+    // For the example, we need to use the built binary, not the example binary
+    // The shim command is in the main secure-llm binary
+    let secure_llm_bin = self_exe
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.join("secure-llm"))
+        .unwrap_or_else(|| PathBuf::from("./target/debug/secure-llm"));
+
+    if !secure_llm_bin.exists() {
+        eprintln!("Error: secure-llm binary not found at {:?}", secure_llm_bin);
+        eprintln!("Please run 'cargo build' first.");
+        return std::process::ExitCode::from(1);
+    }
+
+    println!("Using secure-llm binary: {:?}", secure_llm_bin);
+    println!();
+
     println!("You're about to enter a sandboxed bash shell with network.");
     println!();
     println!("The sandbox has:");
     println!("  - Read-only access to /usr, /lib, /lib64, /bin, /sbin");
     println!("  - Read-write access to {:?}", work_dir);
-    println!("  - Network via veth pair to host");
-    println!("  - Proxy env vars pointing to {}", netns.proxy_url());
-    println!("  - Custom resolv.conf with Google DNS");
+    println!("  - Empty network namespace (--unshare-net)");
+    println!("  - Egress shim forwarding 127.0.0.1:8080 -> Unix socket");
+    println!("  - Proxy with TLS interception on Unix socket");
     println!("  - Ephemeral CA injected into trust store");
     println!();
     println!("Useful commands to try:");
-    println!("  ip addr                 # See network interfaces");
-    println!("  ip route                # See routing table");
-    println!("  cat /etc/resolv.conf    # DNS servers");
-    println!(
-        "  ping {}          # Ping the host (should work)",
-        netns.host_ip
-    );
-    println!("  ping 8.8.8.8            # Ping internet (needs IP forwarding + NAT)");
-    println!("  curl -v http://example.com  # HTTP request (will try proxy)");
-    println!("  env | grep -i proxy     # See proxy environment");
+    println!("  curl -v https://example.com        # HTTPS via proxy (allowed)");
+    println!("  curl -v https://httpbin.org/ip     # Check your IP (allowed)");
+    println!("  curl -v https://evil.com           # Will be BLOCKED by policy");
+    println!("  curl -v http://ifconfig.me         # HTTP via proxy (allowed)");
+    println!("  env | grep -i proxy                # See proxy environment vars");
     println!("  cat /etc/ssl/certs/ca-certificates.crt | tail -30  # See our CA");
+    println!("  ip addr                            # Only loopback (no veth!)");
     println!();
-    println!("Note: Actual internet access requires:");
-    println!("  1. IP forwarding enabled: sudo sysctl net.ipv4.ip_forward=1");
-    println!("  2. NAT rule: sudo iptables -t nat -A POSTROUTING -s 10.200.0.0/24 -j MASQUERADE");
-    println!("  OR a running proxy on {}", netns.proxy_url());
+    println!("Note: ping won't work (no raw sockets), but HTTP/HTTPS will!");
     println!();
     println!("Type 'exit' to leave the sandbox.");
     println!("=========================================");
     println!();
 
-    // Build the bwrap command
+    // Build the bwrap command with rootless socket shim
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
 
-    // When running as root (via sudo), we drop privileges to the original user
-    // SUDO_UID and SUDO_GID are set by sudo to the invoking user's IDs
-    let is_root = unsafe { libc::getuid() } == 0;
+    // The shim command that runs inside the sandbox
+    // Note: We mount secure-llm to /opt/secure-llm since /bin is read-only
+    let shim_and_shell = format!(
+        "/opt/secure-llm internal-shim /tmp/proxy.sock & exec /bin/bash --norc"
+    );
 
-    let mut builder = BwrapBuilder::new();
-
-    if is_root {
-        // Running as root (via sudo) for network namespace setup
-        // Note: bwrap's --unshare-user has permission issues when running as root
-        // and trying to bind-mount user-owned directories. For this debug shell,
-        // we skip user namespace isolation. The production implementation will
-        // use a privileged helper that creates the netns, then spawns an
-        // unprivileged process for the actual sandbox.
-        println!("  Running as root (user namespace isolation skipped for network mode)");
-        builder = builder.unshare_pid();
-    } else {
-        // Running as regular user - use full user namespace isolation
-        builder = builder.unshare_user().map_current_user().unshare_pid();
-    }
-
-    builder = builder
+    let builder = BwrapBuilder::new()
+        // Namespace isolation (rootless!)
+        .unshare_user()
+        .map_current_user()
+        .unshare_pid()
+        .unshare_net() // Empty network namespace - only loopback
         // System directories (read-only)
         .bind_ro(Path::new("/usr"), Path::new("/usr"))
         .bind_ro(Path::new("/lib"), Path::new("/lib"))
@@ -158,10 +264,7 @@ fn main() -> ExitCode {
         .bind_ro_try(Path::new("/lib32"), Path::new("/lib32"))
         .bind_ro(Path::new("/bin"), Path::new("/bin"))
         .bind_ro_try(Path::new("/sbin"), Path::new("/sbin"))
-        .bind_ro_try(
-            Path::new("/etc/alternatives"),
-            Path::new("/etc/alternatives"),
-        )
+        .bind_ro_try(Path::new("/etc/alternatives"), Path::new("/etc/alternatives"))
         .bind_ro_try(Path::new("/etc/ld.so.cache"), Path::new("/etc/ld.so.cache"))
         // Work directory (read-write)
         .bind_rw(work_dir, work_dir)
@@ -169,28 +272,26 @@ fn main() -> ExitCode {
         .tmpfs(Path::new("/tmp"))
         .proc_mount(Path::new("/proc"))
         .dev_minimal()
-        // Inject our resolv.conf
-        .bind_ro(&netns.resolv_conf_path, Path::new("/etc/resolv.conf"))
-        // Inject CA bundle (standard locations)
+        // === ROOTLESS SOCKET SHIM SETUP ===
+        // Bind-mount the proxy Unix socket into the sandbox
+        .bind_rw(&socket_path, Path::new("/tmp/proxy.sock"))
+        // Bind-mount the secure-llm binary (for running the shim)
+        // Note: Can't use /bin since it's read-only, so we use /opt
+        .bind_ro(&secure_llm_bin, Path::new("/opt/secure-llm"))
+        // Inject CA bundle
         .bind_ro(&ca_bundle, Path::new("/etc/ssl/certs/ca-certificates.crt"))
         // Environment - standard vars
         .setenv("HOME", &home)
         .setenv("USER", &user)
-        .setenv(
-            "PATH",
-            "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin",
-        )
-        .setenv(
-            "TERM",
-            &std::env::var("TERM").unwrap_or_else(|_| "xterm".to_string()),
-        )
+        .setenv("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin")
+        .setenv("TERM", &std::env::var("TERM").unwrap_or_else(|_| "xterm".to_string()))
         .setenv("PS1", "\\[\\033[1;32m\\][SANDBOX+NET]\\[\\033[0m\\] \\w $ ")
-        // Proxy environment variables
-        .setenv("HTTP_PROXY", netns.proxy_url())
-        .setenv("HTTPS_PROXY", netns.proxy_url())
-        .setenv("http_proxy", netns.proxy_url())
-        .setenv("https_proxy", netns.proxy_url())
-        .setenv("NO_PROXY", "localhost,127.0.0.1")
+        // Proxy environment - points to the shim's TCP listener
+        .setenv("HTTP_PROXY", "http://127.0.0.1:8080")
+        .setenv("HTTPS_PROXY", "http://127.0.0.1:8080")
+        .setenv("http_proxy", "http://127.0.0.1:8080")
+        .setenv("https_proxy", "http://127.0.0.1:8080")
+        .setenv("NO_PROXY", "localhost")
         // SSL CA bundle location
         .setenv("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt")
         .setenv("CURL_CA_BUNDLE", "/etc/ssl/certs/ca-certificates.crt")
@@ -199,42 +300,46 @@ fn main() -> ExitCode {
         .chdir(work_dir)
         // Die when parent dies
         .die_with_parent()
-        // Run bash
-        .command(Path::new("/bin/bash"), &["--norc".to_string()]);
+        // Run the shim in background, then bash
+        .command(Path::new("/bin/sh"), &["-c".to_string(), shim_and_shell]);
 
-    // Get the bwrap command line
-    let bwrap_cmd = builder.build();
-    let bwrap_args: Vec<_> = std::iter::once(bwrap_cmd.get_program().to_os_string())
-        .chain(bwrap_cmd.get_args().map(|a| a.to_os_string()))
-        .collect();
+    let mut cmd = builder.build();
 
-    // Run bwrap inside the network namespace using `ip netns exec`
-    let status = Command::new("ip")
-        .args(["netns", "exec", &netns.name])
-        .args(&bwrap_args)
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status();
+    // Run the sandbox (blocking)
+    let status = tokio::task::spawn_blocking(move || {
+        cmd.stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+    })
+    .await
+    .expect("Failed to spawn blocking task");
 
-    // Cleanup happens automatically via Drop
+    // Signal proxy to shutdown
+    let _ = shutdown_tx.send(true);
+
+    // Wait for proxy to stop
+    let _ = proxy_handle.await;
+
+    // Cleanup socket
+    let _ = std::fs::remove_file(&socket_path);
 
     match status {
         Ok(s) if s.success() => {
             println!("\nExited sandbox cleanly.");
-            println!("Network namespace and CA cleaned up.");
-            ExitCode::SUCCESS
+            println!("Proxy and CA cleaned up.");
+            std::process::ExitCode::SUCCESS
         }
         Ok(s) => {
             println!("\nSandbox exited with: {:?}", s.code());
-            ExitCode::from(s.code().unwrap_or(1) as u8)
+            std::process::ExitCode::from(s.code().unwrap_or(1) as u8)
         }
         Err(e) => {
             eprintln!("\nFailed to run sandbox: {}", e);
             eprintln!();
             eprintln!("Make sure bubblewrap is installed:");
             eprintln!("  sudo apt install bubblewrap");
-            ExitCode::from(1)
+            std::process::ExitCode::from(1)
         }
     }
 }

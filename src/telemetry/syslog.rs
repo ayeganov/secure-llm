@@ -23,7 +23,8 @@ static AUDIT_LOGGER: OnceLock<AuditLogger> = OnceLock::new();
 /// which is necessary since the logger is stored in a global OnceLock.
 pub struct AuditLogger {
     /// Syslog writer protected by a mutex for interior mutability.
-    writer: Mutex<syslog::Logger<syslog::LoggerBackend, Formatter3164>>,
+    /// None indicates a null logger (for testing).
+    writer: Option<Mutex<syslog::Logger<syslog::LoggerBackend, Formatter3164>>>,
 }
 
 impl AuditLogger {
@@ -44,20 +45,33 @@ impl AuditLogger {
 
         debug!("Connected to syslog with tag '{}'", SYSLOG_TAG);
         Ok(Self {
-            writer: Mutex::new(writer),
+            writer: Some(Mutex::new(writer)),
         })
+    }
+
+    /// Create a null audit logger that discards all events.
+    ///
+    /// Useful for testing when syslog is not available.
+    pub fn new_null() -> Self {
+        Self { writer: None }
     }
 
     /// Log an audit event to syslog.
     ///
     /// The event is serialized to JSON with an ISO8601 timestamp.
+    /// If this is a null logger, the event is silently discarded.
     pub fn log(&self, event: AuditEvent) {
+        let Some(ref writer) = self.writer else {
+            // Null logger - discard silently
+            return;
+        };
+
         let timestamped = event.with_timestamp();
 
         match serde_json::to_string(&timestamped) {
             Ok(json) => {
                 // Log at INFO level to syslog
-                match self.writer.lock() {
+                match writer.lock() {
                     Ok(mut writer) => {
                         if let Err(e) = writer.info(&json) {
                             error!("Failed to write to syslog: {}", e);
@@ -78,7 +92,13 @@ impl AuditLogger {
     /// Log an audit event with additional context.
     ///
     /// The context is appended to the JSON as an additional field.
+    /// If this is a null logger, the event is silently discarded.
     pub fn log_with_context(&self, event: AuditEvent, context: &str) {
+        let Some(ref writer) = self.writer else {
+            // Null logger - discard silently
+            return;
+        };
+
         let timestamped = event.with_timestamp();
 
         // Create a combined structure with context
@@ -96,7 +116,7 @@ impl AuditLogger {
 
         match serde_json::to_string(&with_context) {
             Ok(json) => {
-                match self.writer.lock() {
+                match writer.lock() {
                     Ok(mut writer) => {
                         if let Err(e) = writer.info(&json) {
                             error!("Failed to write to syslog: {}", e);
@@ -112,6 +132,11 @@ impl AuditLogger {
                 error!("Failed to serialize audit event: {}", e);
             }
         }
+    }
+
+    /// Check if this is a null logger.
+    pub fn is_null(&self) -> bool {
+        self.writer.is_none()
     }
 }
 

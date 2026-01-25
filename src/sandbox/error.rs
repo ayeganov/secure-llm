@@ -2,7 +2,6 @@
 //!
 //! This module defines structured error types for all sandbox components:
 //! - Mount verification errors (denied paths, failed canonicalization)
-//! - Network namespace errors (creation, configuration, cleanup)
 //! - CA certificate errors (generation, file operations)
 //! - Bubblewrap errors (command construction, execution)
 
@@ -15,10 +14,6 @@ pub enum SandboxError {
     /// Mount verification failed.
     #[error("Mount verification failed: {0}")]
     Mount(#[from] MountError),
-
-    /// Network namespace operation failed.
-    #[error("Network namespace error: {0}")]
-    Netns(#[from] NetnsError),
 
     /// CA certificate operation failed.
     #[error("CA certificate error: {0}")]
@@ -85,73 +80,6 @@ pub enum MountError {
     /// Invalid denylist pattern.
     #[error("Invalid denylist pattern: {0}")]
     InvalidPattern(String),
-}
-
-/// Errors related to network namespace operations.
-///
-/// These errors occur when creating, configuring, or cleaning up
-/// network namespaces and veth pairs.
-#[derive(Debug, Error)]
-pub enum NetnsError {
-    /// External command (ip, etc.) failed to execute.
-    #[error("Command '{cmd}' failed to execute: {source}")]
-    CommandFailed {
-        /// The command that failed.
-        cmd: String,
-        /// The underlying I/O error.
-        #[source]
-        source: std::io::Error,
-    },
-
-    /// External command executed but returned an error.
-    #[error("Command '{cmd}' returned error: {stderr}")]
-    CommandError {
-        /// The command that returned an error.
-        cmd: String,
-        /// Standard error output from the command.
-        stderr: String,
-    },
-
-    /// Failed to enable IP forwarding via sysctl.
-    #[error("Failed to enable IP forwarding: {source}")]
-    SysctlFailed {
-        /// The underlying I/O error.
-        #[source]
-        source: std::io::Error,
-    },
-
-    /// Network namespace already exists.
-    #[error("Namespace '{name}' already exists")]
-    NamespaceExists {
-        /// The name of the existing namespace.
-        name: String,
-    },
-
-    /// Network namespace not found.
-    #[error("Namespace '{name}' not found")]
-    NamespaceNotFound {
-        /// The name of the missing namespace.
-        name: String,
-    },
-
-    /// Failed to create temporary directory.
-    #[error("Failed to create temp directory: {0}")]
-    TempDir(#[source] std::io::Error),
-
-    /// Failed to write synthetic resolv.conf.
-    #[error("Failed to write synthetic resolv.conf: {0}")]
-    ResolvConfWrite(#[source] std::io::Error),
-
-    /// Failed to determine current user/group.
-    #[error("Failed to get current user info: {0}")]
-    UserInfo(String),
-
-    /// veth interface name too long.
-    #[error("Interface name '{name}' exceeds maximum length of 15 characters")]
-    InterfaceNameTooLong {
-        /// The interface name that was too long.
-        name: String,
-    },
 }
 
 /// Errors related to CA certificate operations.
@@ -259,17 +187,6 @@ mod tests {
     }
 
     #[test]
-    fn test_netns_error_display() {
-        let err = NetnsError::CommandError {
-            cmd: "ip netns add test".to_string(),
-            stderr: "permission denied".to_string(),
-        };
-        let msg = err.to_string();
-        assert!(msg.contains("ip netns add test"));
-        assert!(msg.contains("permission denied"));
-    }
-
-    #[test]
     fn test_ca_error_display() {
         let err = CaError::KeyGeneration("random number generator failed".to_string());
         let msg = err.to_string();
@@ -294,15 +211,6 @@ mod tests {
         };
         let sandbox_err: SandboxError = mount_err.into();
         assert!(matches!(sandbox_err, SandboxError::Mount(_)));
-    }
-
-    #[test]
-    fn test_sandbox_error_from_netns() {
-        let netns_err = NetnsError::NamespaceExists {
-            name: "test-ns".to_string(),
-        };
-        let sandbox_err: SandboxError = netns_err.into();
-        assert!(matches!(sandbox_err, SandboxError::Netns(_)));
     }
 
     #[test]

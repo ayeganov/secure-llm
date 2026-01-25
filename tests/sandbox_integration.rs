@@ -1,75 +1,16 @@
 //! Integration tests for sandbox functionality.
 //!
-//! Run with: sudo cargo test --test sandbox_integration
+//! These tests verify the rootless sandbox architecture works correctly.
+//! Run with: cargo test --test sandbox_integration
 
 use secure_llm::sandbox::{
     bwrap::BwrapBuilder,
     ca::EphemeralCa,
     cleanup::cleanup_stale_resources,
     mounts::MountVerifier,
-    netns::{NetnsConfig, NetworkNamespace},
 };
 use std::path::Path;
 use std::process::Command;
-
-/// Test that we can create and destroy a network namespace.
-#[test]
-fn test_network_namespace_lifecycle() {
-    // Skip if not root
-    if !is_root() {
-        eprintln!("Skipping test_network_namespace_lifecycle: requires root");
-        return;
-    }
-
-    let config = NetnsConfig {
-        name: "secure-llm-test-lifecycle".to_string(),
-        ..Default::default()
-    };
-
-    // Create namespace
-    let netns = NetworkNamespace::create(config).expect("Failed to create namespace");
-
-    // Verify it exists
-    assert!(netns.path().exists(), "Namespace file should exist");
-
-    // Verify resolv.conf was created
-    assert!(
-        netns.resolv_conf_path.exists(),
-        "resolv.conf should be created"
-    );
-
-    // Test ping from namespace to host
-    let output = Command::new("ip")
-        .args([
-            "netns",
-            "exec",
-            &netns.name,
-            "ping",
-            "-c",
-            "1",
-            "-W",
-            "2",
-            &netns.host_ip.to_string(),
-        ])
-        .output()
-        .expect("Failed to run ping");
-
-    assert!(
-        output.status.success(),
-        "Should be able to ping host from namespace: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    // Drop should clean up
-    let name = netns.name.clone();
-    drop(netns);
-
-    // Verify cleanup
-    assert!(
-        !std::path::Path::new(&format!("/run/netns/{}", name)).exists(),
-        "Namespace should be deleted after drop"
-    );
-}
 
 /// Test ephemeral CA generation and certificate signing.
 #[test]
@@ -222,10 +163,6 @@ fn test_sandbox_echo() {
         "Should see echo output: {}",
         stdout
     );
-}
-
-fn is_root() -> bool {
-    unsafe { libc::geteuid() == 0 }
 }
 
 fn bwrap_available() -> bool {

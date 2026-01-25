@@ -15,6 +15,7 @@
 //! - **Mount namespace**: Isolated filesystem view
 //! - **Network namespace**: Isolated network stack (created by netns module)
 //! - **PID namespace**: Isolated process tree
+//! - **UTS namespace**: Isolated hostname (required for custom hostname)
 //!
 //! # Critical: UID/GID Mapping
 //!
@@ -51,6 +52,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use tracing::{debug, info};
 
+/// Canonical path where the CA bundle is mounted inside the sandbox.
+///
+/// This is the Debian/Ubuntu standard location. The bundle is also mounted
+/// to other distro-specific paths, but this is the path that should be used
+/// for environment variables like `SSL_CERT_FILE`.
+pub const SANDBOX_CA_BUNDLE_PATH: &str = "/etc/ssl/certs/ca-certificates.crt";
+
 /// Configuration for a Bubblewrap sandbox.
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
@@ -70,8 +78,13 @@ pub struct SandboxConfig {
     pub ca_bundle_path: PathBuf,
     /// Path to synthetic resolv.conf (avoids systemd-resolved 127.0.0.53 issue).
     pub resolv_conf_path: PathBuf,
-    /// Network namespace file path (from netns module).
-    pub netns_path: Option<PathBuf>,
+    /// Path to proxy Unix socket on host (for bind-mounting into sandbox).
+    ///
+    /// When set, enables the rootless socket shim architecture:
+    /// - The socket is bind-mounted into the sandbox at `/tmp/proxy.sock`
+    /// - The secure-llm binary is bind-mounted at `/bin/secure-llm`
+    /// - The entrypoint runs the shim in background and then the tool
+    pub proxy_socket_path: Option<PathBuf>,
     /// Additional bwrap flags.
     pub extra_flags: Vec<String>,
 }
@@ -176,6 +189,14 @@ impl BwrapBuilder {
     /// wrap the bwrap command with `ip netns exec <name>`.
     pub fn unshare_net(self) -> Self {
         self.arg("--unshare-net")
+    }
+
+    /// Create a new (isolated) UTS namespace.
+    ///
+    /// This isolates the hostname and domain name. Required when using
+    /// `hostname()` to set a custom hostname inside the sandbox.
+    pub fn unshare_uts(self) -> Self {
+        self.arg("--unshare-uts")
     }
 
     /// Add read-only bind mount.
@@ -290,8 +311,8 @@ impl BwrapBuilder {
     /// Use `EphemeralCa::create_combined_bundle()` to generate this file.
     pub fn ca_certificate_mounts(self, ca_bundle_path: &Path) -> Self {
         self
-            // Debian/Ubuntu location
-            .bind_ro(ca_bundle_path, Path::new("/etc/ssl/certs/ca-certificates.crt"))
+            // Debian/Ubuntu location (canonical path used by SANDBOX_CA_BUNDLE_PATH)
+            .bind_ro(ca_bundle_path, Path::new(SANDBOX_CA_BUNDLE_PATH))
             // RHEL/Fedora location
             .bind_ro(ca_bundle_path, Path::new("/etc/pki/tls/certs/ca-bundle.crt"))
             // Generic location some tools use
@@ -408,6 +429,7 @@ impl SandboxLauncher {
             .unshare_user()
             .map_current_user() // CRITICAL: Without this, process runs as nobody!
             .unshare_pid()
+            .unshare_uts() // Required for custom hostname
             .proc_mount(Path::new("/proc"))
             .standard_system_mounts(&config.resolv_conf_path)
             .ca_certificate_mounts(&config.ca_bundle_path)
@@ -415,17 +437,9 @@ impl SandboxLauncher {
             .die_with_parent()
             .hostname("sandbox");
 
-        // Network isolation
-        // Note: To join an existing network namespace, the caller should wrap
-        // the bwrap command with `ip netns exec <name>`. This is handled by
-        // the higher-level sandbox orchestration in Phase 3.
-        if config.netns_path.is_some() {
-            // Network namespace is handled externally via ip netns exec
-            // Don't unshare network - we inherit from the netns
-        } else {
-            // If no netns provided, create isolated network
-            builder = builder.unshare_net();
-        }
+        // Network isolation - always use --unshare-net for rootless operation
+        // The egress shim inside the sandbox bridges traffic to the host via Unix socket
+        builder = builder.unshare_net();
 
         // Add read-only bind mounts
         for mount in &config.bind_ro {
@@ -459,8 +473,41 @@ impl SandboxLauncher {
             builder = builder.arg(flag);
         }
 
-        // Set the command to execute
-        builder = builder.command(&config.tool_binary, &config.tool_args);
+        // Configure rootless socket shim if enabled
+        if let Some(ref socket_path) = config.proxy_socket_path {
+            // Bind-mount the proxy socket into the sandbox
+            builder = builder.bind_rw(socket_path, Path::new("/tmp/proxy.sock"));
+
+            // Bind-mount the secure-llm binary (ourselves) into the sandbox
+            // This allows us to run the shim inside the sandbox
+            // Note: Can't use /bin since it's mounted read-only, so we use /opt
+            let self_exe = std::env::current_exe().map_err(|e| MountError::PathResolution {
+                path: PathBuf::from("/proc/self/exe"),
+                source: e,
+            })?;
+            builder = builder.bind_ro(&self_exe, Path::new("/opt/secure-llm"));
+
+            // The entrypoint runs the shim in background, then execs the tool
+            // Format: /bin/sh -c "/opt/secure-llm internal-shim /tmp/proxy.sock & exec <tool> <args>"
+            let tool_cmd = if config.tool_args.is_empty() {
+                config.tool_binary.display().to_string()
+            } else {
+                format!(
+                    "{} {}",
+                    config.tool_binary.display(),
+                    config.tool_args.join(" ")
+                )
+            };
+            let shell_cmd = format!(
+                "/opt/secure-llm internal-shim /tmp/proxy.sock & exec {}",
+                tool_cmd
+            );
+
+            builder = builder.command(Path::new("/bin/sh"), &["-c".to_string(), shell_cmd]);
+        } else {
+            // Direct tool execution (no shim)
+            builder = builder.command(&config.tool_binary, &config.tool_args);
+        }
 
         debug!("Bwrap command: {}", builder.to_command_line());
 
@@ -483,7 +530,7 @@ impl SandboxLauncher {
         Ok(SandboxHandle {
             child,
             pid,
-            netns_path: config.netns_path,
+            proxy_socket_path: config.proxy_socket_path,
         })
     }
 }
@@ -493,8 +540,8 @@ pub struct SandboxHandle {
     child: Child,
     /// PID of the bwrap process.
     pub pid: u32,
-    /// Path to network namespace (if created).
-    pub netns_path: Option<PathBuf>,
+    /// Path to proxy Unix socket (if using shim architecture).
+    pub proxy_socket_path: Option<PathBuf>,
 }
 
 impl SandboxHandle {

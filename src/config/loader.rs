@@ -332,7 +332,8 @@ mod tests {
 
     fn create_test_cli() -> Cli {
         Cli {
-            tool: "claude".to_string(),
+            command: None,
+            tool: Some("claude".to_string()),
             tool_args: vec![],
             publish: vec![],
             allow_domains: vec![],

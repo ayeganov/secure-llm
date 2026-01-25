@@ -1,31 +1,72 @@
-//! Port monitoring module (Phase 3 detection, Phase 5 dynamic bridging).
+//! Port monitoring and forwarding module.
 //!
-//! This module will provide:
-//! - Detection of new listening ports in the sandbox
+//! This module provides:
+//! - Detection of new listening ports inside the sandbox
 //! - Pre-configured port mapping (--publish flag)
-//! - Dynamic port bridging with TUI prompts (Phase 5)
+//! - Dynamic port bridging (Phase 5 will add TUI prompts)
 //! - Namespace-crossing TCP forwarding
+//!
+//! # Architecture
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │                    Sandbox (Network NS)                      │
+//! │                                                              │
+//! │  ┌─────────────┐     Port Detection                         │
+//! │  │  Tool       │     (/proc/<pid>/net/tcp)                   │
+//! │  │  (listening │◄────────────────────────────┐              │
+//! │  │   on :3000) │                             │              │
+//! │  └──────┬──────┘                             │              │
+//! │         │                                    │              │
+//! │         │ veth (10.200.0.2)                  │              │
+//! └─────────┼────────────────────────────────────┼──────────────┘
+//!           │                                    │
+//!           ▼                                    │
+//! ┌─────────────────────┐               ┌───────┴───────┐
+//! │    Port Forwarder   │               │ Port Detector │
+//! │  (host:3000 ->      │               │ (polls every  │
+//! │   10.200.0.2:3000)  │               │  2 seconds)   │
+//! └─────────────────────┘               └───────────────┘
+//!           │
+//!           ▼
+//! ┌─────────────────────┐
+//! │   Host Network      │
+//! │   (0.0.0.0:3000)    │
+//! │                     │
+//! │   curl localhost:3000  ───────────► Works!
+//! └─────────────────────┘
+//! ```
+//!
+//! # Example
+//!
+//! ```ignore
+//! use secure_llm::portmon::{PortDetector, PortForwardManager, PortEvent, PortState};
+//! use std::time::Duration;
+//! use std::net::Ipv4Addr;
+//!
+//! // Start port detection
+//! let detector = PortDetector::new(sandbox_pid, Duration::from_secs(2));
+//! let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+//! tokio::spawn(detector.run(tx, shutdown_rx.clone()));
+//!
+//! // Set up static port forwards from --publish flags
+//! let mut manager = PortForwardManager::new(Ipv4Addr::new(10, 200, 0, 2));
+//! manager.start_forward(3000, 3000)?;
+//!
+//! // Handle detection events
+//! while let Some(event) = rx.recv().await {
+//!     if event.state == PortState::New {
+//!         println!("New port detected: {}", event.port.port);
+//!         // In Phase 5, this would prompt the user via TUI
+//!     }
+//! }
+//! ```
 
-// Phase 3/5 submodules (to be implemented):
-// pub mod detector;   // Port detection via /proc
-// pub mod forwarder;  // TCP port bridging
+pub mod detector;
+pub mod error;
+pub mod forwarder;
 
-/// Placeholder for port monitoring functionality.
-///
-/// Port detection will be implemented in Phase 3.
-/// Dynamic bridging with TUI will be implemented in Phase 5.
-pub struct PortMonitor;
-
-impl PortMonitor {
-    /// Create a new port monitor (not yet implemented).
-    #[must_use]
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for PortMonitor {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Re-export main types for convenient access
+pub use detector::{ListeningPort, PortDetector, PortEvent, PortState};
+pub use error::{PortMonError, PortMonResult};
+pub use forwarder::{ForwardConfig, PortForwardManager, PortForwarder};

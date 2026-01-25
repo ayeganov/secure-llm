@@ -16,6 +16,9 @@ pub const PROFILE_CURSOR: &str = include_str!("../../profiles/cursor.toml");
 /// Embedded profile for Windsurf IDE.
 pub const PROFILE_WINDSURF: &str = include_str!("../../profiles/windsurf.toml");
 
+/// Embedded profile for Google Gemini CLI.
+pub const PROFILE_GEMINI: &str = include_str!("../../profiles/gemini.toml");
+
 /// Complete tool profile configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ToolProfile {
@@ -81,13 +84,14 @@ impl ToolProfile {
             "claude" => Some(PROFILE_CLAUDE),
             "cursor" => Some(PROFILE_CURSOR),
             "windsurf" => Some(PROFILE_WINDSURF),
+            "gemini" => Some(PROFILE_GEMINI),
             _ => None,
         }
     }
 
     /// List all built-in profile names.
     pub fn builtin_names() -> &'static [&'static str] {
-        &["claude", "cursor", "windsurf"]
+        &["claude", "cursor", "windsurf", "gemini"]
     }
 
     /// Check if a name matches a built-in profile.
@@ -105,6 +109,7 @@ mod tests {
         assert!(ToolProfile::get_embedded("claude").is_some());
         assert!(ToolProfile::get_embedded("cursor").is_some());
         assert!(ToolProfile::get_embedded("windsurf").is_some());
+        assert!(ToolProfile::get_embedded("gemini").is_some());
         assert!(ToolProfile::get_embedded("unknown").is_none());
     }
 
@@ -113,6 +118,7 @@ mod tests {
         assert!(ToolProfile::is_builtin("claude"));
         assert!(ToolProfile::is_builtin("cursor"));
         assert!(ToolProfile::is_builtin("windsurf"));
+        assert!(ToolProfile::is_builtin("gemini"));
         assert!(!ToolProfile::is_builtin("custom-tool"));
     }
 
@@ -122,6 +128,7 @@ mod tests {
         assert!(names.contains(&"claude"));
         assert!(names.contains(&"cursor"));
         assert!(names.contains(&"windsurf"));
+        assert!(names.contains(&"gemini"));
     }
 
     // Profile parsing tests are in loader.rs since they depend on

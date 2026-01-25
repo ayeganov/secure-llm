@@ -2,7 +2,7 @@
 //!
 //! Uses clap's derive API for type-safe argument parsing.
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 /// Security sandbox wrapper for agentic IDEs.
@@ -15,13 +15,18 @@ use std::path::PathBuf;
 #[command(author, version, about, long_about = None)]
 #[command(propagate_version = true)]
 pub struct Cli {
+    /// Subcommand to run (or omit for normal sandbox mode).
+    #[command(subcommand)]
+    pub command: Option<Commands>,
+
     /// Tool to launch (claude, cursor, windsurf, or path to binary).
     ///
     /// For built-in profiles (claude, cursor, windsurf), the corresponding
     /// embedded configuration will be used. For custom tools, provide the
     /// full path or use --profile to specify a custom profile.
-    #[arg(required = true)]
-    pub tool: String,
+    ///
+    /// Required unless using a subcommand like `internal-shim`.
+    pub tool: Option<String>,
 
     /// Arguments to pass to the tool.
     ///
@@ -76,6 +81,22 @@ pub struct Cli {
     pub verbose: u8,
 }
 
+/// Subcommands for secure-llm.
+#[derive(Subcommand, Debug)]
+pub enum Commands {
+    /// Internal shim for TCP-to-Unix socket forwarding (hidden).
+    ///
+    /// This command runs inside the sandbox to bridge TCP connections
+    /// to the host proxy via a Unix socket. It should not be invoked
+    /// directly by users.
+    #[command(name = "internal-shim", hide = true)]
+    InternalShim {
+        /// Path to the Unix socket to forward to.
+        #[arg(required = true)]
+        socket_path: PathBuf,
+    },
+}
+
 impl Cli {
     /// Parse port mapping string into (host_port, container_port) tuple.
     ///
@@ -128,10 +149,11 @@ mod tests {
     #[test]
     fn test_cli_parse_basic() {
         let cli = Cli::parse_from(["secure-llm", "claude"]);
-        assert_eq!(cli.tool, "claude");
+        assert_eq!(cli.tool, Some("claude".to_string()));
         assert!(cli.tool_args.is_empty());
         assert!(!cli.headless);
         assert_eq!(cli.verbose, 0);
+        assert!(cli.command.is_none());
     }
 
     #[test]
@@ -139,7 +161,7 @@ mod tests {
         // Note: Using "--foo" instead of "--help" because clap intercepts --help
         // In production, tool args like "--help" would need to come after "--"
         let cli = Cli::parse_from(["secure-llm", "claude", "--foo", "extra"]);
-        assert_eq!(cli.tool, "claude");
+        assert_eq!(cli.tool, Some("claude".to_string()));
         assert_eq!(cli.tool_args, vec!["--foo", "extra"]);
     }
 
@@ -160,7 +182,7 @@ mod tests {
             "arg1",
         ]);
 
-        assert_eq!(cli.tool, "cursor");
+        assert_eq!(cli.tool, Some("cursor".to_string()));
         assert_eq!(cli.publish, vec!["3000:3000", "8080:80"]);
         assert_eq!(cli.allow_domains, vec!["api.example.com"]);
         assert!(cli.headless);
@@ -183,5 +205,18 @@ mod tests {
 
         let mappings = cli.port_mappings();
         assert_eq!(mappings, vec![(3000, 3000), (8080, 80)]);
+    }
+
+    #[test]
+    fn test_internal_shim_command() {
+        let cli = Cli::parse_from(["secure-llm", "internal-shim", "/tmp/proxy.sock"]);
+
+        assert!(cli.tool.is_none());
+        match cli.command {
+            Some(Commands::InternalShim { socket_path }) => {
+                assert_eq!(socket_path, PathBuf::from("/tmp/proxy.sock"));
+            }
+            None => panic!("Expected InternalShim command"),
+        }
     }
 }

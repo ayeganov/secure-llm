@@ -1,0 +1,30 @@
+# Tool profile for Google Gemini CLI
+
+[tool]
+name = "gemini"
+display_name = "Gemini CLI"
+binary = "gemini"
+description = "Google Gemini CLI - AI-powered coding assistant"
+
+[environment]
+# Proxy configuration for network traffic
+# ${SANDBOX_PROXY} is expanded at sandbox launch time to http://127.0.0.1:8080
+HTTP_PROXY = "${SANDBOX_PROXY}"
+HTTPS_PROXY = "${SANDBOX_PROXY}"
+http_proxy = "${SANDBOX_PROXY}"
+https_proxy = "${SANDBOX_PROXY}"
+
+# Certificate configuration for TLS interception
+SSL_CERT_FILE = "${SANDBOX_CA_CERT}"
+NODE_EXTRA_CA_CERTS = "${SANDBOX_CA_CERT}"
+REQUESTS_CA_BUNDLE = "${SANDBOX_CA_CERT}"
+
+[network]
+# Google/Gemini domains that need to be allowed
+allowlist = [
+    "generativelanguage.googleapis.com",
+    "*.googleapis.com",
+    "accounts.google.com",
+    "oauth2.googleapis.com",
+    "*.google.com",
+]

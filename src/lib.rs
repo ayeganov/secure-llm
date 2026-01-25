@@ -27,5 +27,6 @@ pub mod control;
 pub mod portmon;
 pub mod proxy;
 pub mod sandbox;
+pub mod shim;
 pub mod telemetry;
 pub mod tui;
