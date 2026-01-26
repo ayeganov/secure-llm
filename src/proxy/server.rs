@@ -77,6 +77,9 @@ pub struct ProxyConfig {
     pub prompt_timeout: Duration,
     /// Reference to the audit logger.
     pub audit: Arc<AuditLogger>,
+    /// Optional channel for sending messages to the TUI (Phase 4).
+    /// If None, permission requests won't be sent to TUI.
+    pub control_tx: Option<tokio::sync::mpsc::Sender<crate::control::ProxyToTui>>,
 }
 
 /// The main proxy server.
@@ -132,12 +135,12 @@ impl ProxyServer {
     pub async fn run(self) -> Result<(), ProxyError> {
         // Ensure parent directory exists
         if let Some(parent) = self.config.listen_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| ProxyError::Io(e))?;
+            fs::create_dir_all(parent).map_err(ProxyError::Io)?;
         }
 
         // Remove existing socket file if present
         if self.config.listen_path.exists() {
-            fs::remove_file(&self.config.listen_path).map_err(|e| ProxyError::Io(e))?;
+            fs::remove_file(&self.config.listen_path).map_err(ProxyError::Io)?;
         }
 
         // Bind Unix socket
@@ -146,7 +149,7 @@ impl ProxyServer {
         // Set socket permissions to 0600 (user only)
         let permissions = fs::Permissions::from_mode(0o600);
         fs::set_permissions(&self.config.listen_path, permissions)
-            .map_err(|e| ProxyError::Io(e))?;
+            .map_err(ProxyError::Io)?;
 
         info!("Proxy listening on {:?}", self.config.listen_path);
 
@@ -198,10 +201,11 @@ impl ProxyServer {
         let hold_manager = self.hold_manager.clone();
         let headless = self.config.headless;
         let audit = self.config.audit.clone();
+        let control_tx = self.config.control_tx.clone();
 
         tokio::spawn(async move {
             if let Err(e) =
-                handle_connection(stream, cert_cache, policy, hold_manager, headless, audit)
+                handle_connection(stream, cert_cache, policy, hold_manager, headless, audit, control_tx)
                     .await
             {
                 // Don't log connection resets as errors - they're common
@@ -258,6 +262,7 @@ async fn handle_connection(
     hold_manager: Arc<ConnectionHoldManager>,
     headless: bool,
     audit: Arc<AuditLogger>,
+    control_tx: Option<tokio::sync::mpsc::Sender<crate::control::ProxyToTui>>,
 ) -> Result<(), ProxyError> {
     let io = TokioIo::new(stream);
 
@@ -267,9 +272,10 @@ async fn handle_connection(
         let policy = policy.clone();
         let hold_manager = hold_manager.clone();
         let audit = audit.clone();
+        let control_tx = control_tx.clone();
 
         async move {
-            proxy_request(req, cert_cache, policy, hold_manager, headless, audit).await
+            proxy_request(req, cert_cache, policy, hold_manager, headless, audit, control_tx).await
         }
     });
 
@@ -291,13 +297,14 @@ async fn proxy_request(
     hold_manager: Arc<ConnectionHoldManager>,
     headless: bool,
     audit: Arc<AuditLogger>,
+    control_tx: Option<tokio::sync::mpsc::Sender<crate::control::ProxyToTui>>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
     if req.method() == Method::CONNECT {
         // HTTPS tunneling via CONNECT
-        handle_connect(req, cert_cache, policy, hold_manager, headless, audit).await
+        handle_connect(req, cert_cache, policy, hold_manager, headless, audit, control_tx).await
     } else {
         // Plain HTTP proxying
-        handle_http(req, policy, headless, audit).await
+        handle_http(req, policy, hold_manager, headless, audit, control_tx).await
     }
 }
 
@@ -377,6 +384,7 @@ impl ProxyServerBuilder {
             headless: self.headless,
             prompt_timeout: self.prompt_timeout,
             audit: self.audit.expect("audit is required"),
+            control_tx: None,
         };
 
         ProxyServer::new(config, shutdown_rx)
@@ -413,6 +421,7 @@ mod tests {
             headless: true,
             prompt_timeout: Duration::from_secs(30),
             audit,
+            control_tx: None,
         };
 
         let (_, rx) = watch::channel(false);

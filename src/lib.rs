@@ -22,6 +22,8 @@
 #![warn(missing_docs)]
 
 pub mod cli;
+pub mod cli_handler;
+pub mod orchestrator;
 pub mod config;
 pub mod control;
 pub mod portmon;

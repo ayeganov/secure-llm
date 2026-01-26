@@ -60,6 +60,13 @@ pub enum MountError {
         mount_source: String,
     },
 
+    /// Path is explicitly denied.
+    #[error("Path '{path}' is explicitly denied")]
+    DeniedPath {
+        /// The path that was requested.
+        path: PathBuf,
+    },
+
     /// Failed to resolve path to canonical form.
     #[error("Failed to resolve path '{path}': {source}")]
     PathResolution {

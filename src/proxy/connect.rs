@@ -33,6 +33,7 @@ use super::error::ProxyError;
 use super::hold::{ConnectionDecision, ConnectionHoldManager};
 use super::policy::{PolicyDecision, PolicyEngine};
 use super::tls::{create_tls_acceptor, create_tls_connector, domain_to_server_name, CertificateCache};
+use crate::control::ProxyToTui;
 use crate::telemetry::{AuditEvent, BlockReason, Decision, AuditLogger};
 use bytes::Bytes;
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
@@ -42,6 +43,15 @@ use hyper::{Request, Response, StatusCode};
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
+
+/// Context for handling domain prompting.
+struct PromptContext {
+    cert_cache: Arc<CertificateCache>,
+    hold_manager: Arc<ConnectionHoldManager>,
+    policy: Arc<PolicyEngine>,
+    audit: Arc<AuditLogger>,
+    control_tx: Option<tokio::sync::mpsc::Sender<crate::control::ProxyToTui>>,
+}
 
 /// Handle HTTP CONNECT request for HTTPS tunneling.
 ///
@@ -57,6 +67,7 @@ use tracing::{debug, info, warn};
 /// * `hold_manager` - Manager for pending connections.
 /// * `headless` - Whether running in headless mode (no TUI prompts).
 /// * `audit` - Audit logger for security events.
+/// * `control_tx` - Optional channel for sending messages to TUI.
 pub async fn handle_connect(
     req: Request<Incoming>,
     cert_cache: Arc<CertificateCache>,
@@ -64,6 +75,7 @@ pub async fn handle_connect(
     hold_manager: Arc<ConnectionHoldManager>,
     headless: bool,
     audit: Arc<AuditLogger>,
+    control_tx: Option<tokio::sync::mpsc::Sender<crate::control::ProxyToTui>>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
     // Extract the target host:port from CONNECT request
     let target = req
@@ -96,7 +108,8 @@ pub async fn handle_connect(
                 host, upstream_host, reason
             );
 
-            establish_tunnel(req, upstream_host, port, cert_cache).await
+            // Pass both original host (for client cert) and upstream host (for connection)
+            establish_tunnel(req, &host, upstream_host, port, cert_cache).await
         }
         PolicyDecision::Block { reason } => {
             // Domain is blocked - return 403
@@ -130,8 +143,14 @@ pub async fn handle_connect(
                 )))
             } else {
                 // In interactive mode, hold connection pending user decision
-                handle_prompt_domain(req, &host, port, cert_cache, hold_manager, policy, audit)
-                    .await
+                let ctx = PromptContext {
+                    cert_cache,
+                    hold_manager,
+                    policy,
+                    audit,
+                    control_tx,
+                };
+                handle_prompt_domain(req, &host, port, ctx).await
             }
         }
     }
@@ -145,21 +164,30 @@ async fn handle_prompt_domain(
     req: Request<Incoming>,
     host: &str,
     port: u16,
-    cert_cache: Arc<CertificateCache>,
-    hold_manager: Arc<ConnectionHoldManager>,
-    policy: Arc<PolicyEngine>,
-    audit: Arc<AuditLogger>,
+    ctx: PromptContext,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
     // Park the connection
-    let (id, decision_rx) = hold_manager.park(host.to_string(), port);
+    let (id, decision_rx) = ctx.hold_manager.park(host.to_string(), port);
 
     info!(
         "Connection {} waiting for decision on {}:{}",
         id, host, port
     );
 
-    // TODO: In Phase 4, send IPC message to TUI here
-    // For now in Phase 3, we just wait for the decision (which will timeout)
+    // Send permission request to TUI via control channel (Phase 4)
+    if let Some(ref tx) = ctx.control_tx {
+        use crate::control::ProxyToTui;
+        let msg = ProxyToTui::PermissionRequest {
+            id,
+            domain: host.to_string(),
+            port,
+            timestamp: chrono::Utc::now(),
+        };
+        // Non-blocking send - if TUI is not available, the request will timeout
+        if let Err(e) = tx.try_send(msg) {
+            debug!("Failed to send permission request to TUI: {} (TUI may not be running)", e);
+        }
+    }
 
     // Wait for decision
     match decision_rx.await {
@@ -167,25 +195,27 @@ async fn handle_prompt_domain(
             info!("Connection {} allowed for {}:{}", id, host, port);
 
             // Record the session decision
-            policy.record_decision(host, true);
+            ctx.policy.record_decision(host, true);
 
             // Log the prompt result
-            audit.log(AuditEvent::NetworkPrompt {
+            ctx.audit.log(AuditEvent::NetworkPrompt {
                 domain: host.to_string(),
                 decision: Decision::Allow,
                 persist: false, // Session only for now
             });
 
-            establish_tunnel(req, host, port, cert_cache).await
+            // Check for host rewrite (approved domains can still be rewritten)
+            let upstream_host = ctx.policy.get_rewrite(host).unwrap_or_else(|| host.to_string());
+            establish_tunnel(req, host, &upstream_host, port, ctx.cert_cache).await
         }
         Ok(ConnectionDecision::Block) => {
             info!("Connection {} blocked for {}:{}", id, host, port);
 
             // Record the session decision
-            policy.record_decision(host, false);
+            ctx.policy.record_decision(host, false);
 
             // Log the prompt result
-            audit.log(AuditEvent::NetworkPrompt {
+            ctx.audit.log(AuditEvent::NetworkPrompt {
                 domain: host.to_string(),
                 decision: Decision::Block,
                 persist: false,
@@ -200,7 +230,16 @@ async fn handle_prompt_domain(
             // Channel closed (likely timeout or cancel)
             warn!("Connection {} channel closed for {}:{}", id, host, port);
 
-            audit.log(AuditEvent::NetworkBlock {
+            // Notify TUI that the request was cancelled
+            if let Some(ref tx) = ctx.control_tx {
+                let msg = ProxyToTui::PermissionCancelled {
+                    id,
+                    reason: "timeout".to_string(),
+                };
+                let _ = tx.try_send(msg);
+            }
+
+            ctx.audit.log(AuditEvent::NetworkBlock {
                 domain: host.to_string(),
                 reason: BlockReason::PromptTimeout,
             });
@@ -219,26 +258,45 @@ async fn handle_prompt_domain(
 /// 1. Returns 200 Connection Established
 /// 2. Spawns a task to handle the upgraded connection
 /// 3. The task performs TLS interception and bidirectional forwarding
+///
+/// # Arguments
+///
+/// * `req` - The HTTP CONNECT request to upgrade
+/// * `client_host` - The host the client requested (used for certificate generation)
+/// * `upstream_host` - The actual host to connect to (may differ due to host rewrite)
+/// * `port` - The port to connect to
+/// * `cert_cache` - Certificate cache for TLS interception
 async fn establish_tunnel(
     req: Request<Incoming>,
-    host: &str,
+    client_host: &str,
+    upstream_host: &str,
     port: u16,
     cert_cache: Arc<CertificateCache>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
-    let host = host.to_string();
+    let client_host = client_host.to_string();
+    let upstream_host = upstream_host.to_string();
     let cert_cache = cert_cache.clone();
 
     // Spawn a task to handle the tunnel after upgrade
     tokio::spawn(async move {
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
-                if let Err(e) = tunnel_connection(upgraded, &host, port, cert_cache).await {
+                if let Err(e) =
+                    tunnel_connection(upgraded, &client_host, &upstream_host, port, cert_cache)
+                        .await
+                {
                     // Don't log as error - connection resets are common
-                    debug!("Tunnel ended for {}:{}: {}", host, port, e);
+                    debug!(
+                        "Tunnel ended for {} (upstream: {}): {}",
+                        client_host, upstream_host, e
+                    );
                 }
             }
             Err(e) => {
-                warn!("HTTP upgrade failed for {}:{}: {}", host, port, e);
+                warn!(
+                    "HTTP upgrade failed for {} (upstream: {}): {}",
+                    client_host, upstream_host, e
+                );
             }
         }
     });
@@ -257,16 +315,28 @@ async fn establish_tunnel(
 /// 2. Perform TLS handshake with upstream
 /// 3. Accept TLS from client using dynamically generated cert
 /// 4. Forward data bidirectionally
+///
+/// # Arguments
+///
+/// * `upgraded` - The upgraded HTTP connection
+/// * `client_host` - The host the client requested (used for certificate generation)
+/// * `upstream_host` - The actual host to connect to (may differ due to host rewrite)
+/// * `port` - The port to connect to
+/// * `cert_cache` - Certificate cache for TLS interception
 async fn tunnel_connection(
     upgraded: Upgraded,
-    host: &str,
+    client_host: &str,
+    upstream_host: &str,
     port: u16,
     cert_cache: Arc<CertificateCache>,
 ) -> Result<(), ProxyError> {
-    debug!("Starting tunnel to {}:{}", host, port);
+    debug!(
+        "Starting tunnel: client requested {}, connecting to {}:{}",
+        client_host, upstream_host, port
+    );
 
     // Connect to upstream server first (fail fast)
-    let upstream_addr = format!("{}:{}", host, port);
+    let upstream_addr = format!("{}:{}", upstream_host, port);
     let upstream = TcpStream::connect(&upstream_addr).await.map_err(|e| {
         ProxyError::UpstreamConnect {
             addr: upstream_addr.clone(),
@@ -274,11 +344,11 @@ async fn tunnel_connection(
         }
     })?;
 
-    debug!("Connected to upstream {}:{}", host, port);
+    debug!("Connected to upstream {}:{}", upstream_host, port);
 
     // Create TLS connector for upstream
     let tls_connector = create_tls_connector()?;
-    let server_name = domain_to_server_name(host)?;
+    let server_name = domain_to_server_name(upstream_host)?;
 
     // TLS handshake with upstream
     let upstream_tls = tls_connector
@@ -286,10 +356,12 @@ async fn tunnel_connection(
         .await
         .map_err(|e| ProxyError::Tls(format!("Upstream TLS handshake failed: {}", e)))?;
 
-    debug!("TLS established with upstream {}:{}", host, port);
+    debug!("TLS established with upstream {}:{}", upstream_host, port);
 
-    // Create TLS acceptor for client side with domain hint
-    let tls_acceptor = create_tls_acceptor(cert_cache, Some(host.to_string()))?;
+    // Create TLS acceptor for client side using the ORIGINAL host the client requested
+    // This ensures the client sees a certificate for the domain it asked for,
+    // even if we're actually connecting to a different upstream (host rewrite)
+    let tls_acceptor = create_tls_acceptor(cert_cache, Some(client_host.to_string()))?;
 
     // Accept TLS from client
     // We need to convert the Upgraded to a type that TlsAcceptor can use
@@ -298,7 +370,7 @@ async fn tunnel_connection(
         .await
         .map_err(|e| ProxyError::Tls(format!("Client TLS handshake failed: {}", e)))?;
 
-    debug!("TLS established with client for {}:{}", host, port);
+    debug!("TLS established with client for {}", client_host);
 
     // Bidirectional copy between client and upstream
     let (mut client_read, mut client_write) = tokio::io::split(client_tls);
@@ -327,7 +399,10 @@ async fn tunnel_connection(
         }
     }
 
-    debug!("Tunnel closed for {}:{}", host, port);
+    debug!(
+        "Tunnel closed for {} (upstream: {})",
+        client_host, upstream_host
+    );
     Ok(())
 }
 
@@ -389,24 +464,27 @@ fn forbidden_response(message: &str) -> Response<BoxBody<Bytes, hyper::Error>> {
 pub async fn handle_http(
     req: Request<Incoming>,
     policy: Arc<PolicyEngine>,
+    hold_manager: Arc<ConnectionHoldManager>,
     headless: bool,
     audit: Arc<AuditLogger>,
+    control_tx: Option<tokio::sync::mpsc::Sender<crate::control::ProxyToTui>>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
-    // Extract host from the request URI
-    let uri = req.uri();
-    let host = uri
+    // Extract host from the request URI (clone to avoid borrow issues)
+    let host = req
+        .uri()
         .host()
-        .ok_or_else(|| ProxyError::InvalidConnect("Missing host in request URI".into()))?;
+        .ok_or_else(|| ProxyError::InvalidConnect("Missing host in request URI".into()))?
+        .to_string();
 
     debug!("HTTP proxy request to {}", host);
 
     // Evaluate policy
-    let decision = policy.evaluate(host);
+    let decision = policy.evaluate(&host);
 
     match decision {
         PolicyDecision::Allow { reason, .. } => {
             audit.log(AuditEvent::NetworkAllow {
-                domain: host.to_string(),
+                domain: host.clone(),
                 reason,
             });
 
@@ -415,7 +493,7 @@ pub async fn handle_http(
         }
         PolicyDecision::Block { reason } => {
             audit.log(AuditEvent::NetworkBlock {
-                domain: host.to_string(),
+                domain: host.clone(),
                 reason,
             });
 
@@ -427,7 +505,7 @@ pub async fn handle_http(
         PolicyDecision::Prompt => {
             if headless {
                 audit.log(AuditEvent::NetworkBlock {
-                    domain: host.to_string(),
+                    domain: host.clone(),
                     reason: BlockReason::PromptTimeout,
                 });
 
@@ -436,18 +514,105 @@ pub async fn handle_http(
                     host
                 )))
             } else {
-                // In Phase 3, just block with a message
-                // Phase 4 will add proper prompting
-                audit.log(AuditEvent::NetworkBlock {
-                    domain: host.to_string(),
-                    reason: BlockReason::PromptTimeout,
-                });
-
-                Ok(forbidden_response(&format!(
-                    "HTTP request to {} requires approval (not available in Phase 3)",
-                    host
-                )))
+                // Hold connection pending user decision
+                handle_prompt_http(req, &host, hold_manager, policy, audit, control_tx).await
             }
+        }
+    }
+}
+
+/// Handle an HTTP request that requires user permission.
+async fn handle_prompt_http(
+    req: Request<Incoming>,
+    host: &str,
+    hold_manager: Arc<ConnectionHoldManager>,
+    policy: Arc<PolicyEngine>,
+    audit: Arc<AuditLogger>,
+    control_tx: Option<tokio::sync::mpsc::Sender<crate::control::ProxyToTui>>,
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
+    use crate::control::ProxyToTui;
+    use crate::proxy::hold::ConnectionDecision;
+
+    // Park the connection, waiting for a decision
+    let (id, decision_rx) = hold_manager.park(host.to_string(), 80);
+
+    info!(
+        "HTTP connection {} waiting for decision on {}",
+        id, host
+    );
+
+    // Send permission request to TUI via control channel
+    if let Some(ref tx) = control_tx {
+        let msg = ProxyToTui::PermissionRequest {
+            id,
+            domain: host.to_string(),
+            port: 80,
+            timestamp: chrono::Utc::now(),
+        };
+        // Non-blocking send - if TUI is not available, the request will timeout
+        if let Err(e) = tx.try_send(msg) {
+            debug!("Failed to send HTTP permission request to TUI: {} (TUI may not be running)", e);
+        }
+    }
+
+    // Wait for decision
+    match decision_rx.await {
+        Ok(ConnectionDecision::Allow) => {
+            info!("HTTP connection {} allowed for {}", id, host);
+
+            // Record the session decision
+            policy.record_decision(host, true);
+
+            // Log the prompt result
+            audit.log(AuditEvent::NetworkPrompt {
+                domain: host.to_string(),
+                decision: Decision::Allow,
+                persist: false,
+            });
+
+            // Forward the request
+            forward_http_request(req).await
+        }
+        Ok(ConnectionDecision::Block) => {
+            info!("HTTP connection {} blocked for {}", id, host);
+
+            // Record the session decision
+            policy.record_decision(host, false);
+
+            // Log the prompt result
+            audit.log(AuditEvent::NetworkPrompt {
+                domain: host.to_string(),
+                decision: Decision::Block,
+                persist: false,
+            });
+
+            Ok(forbidden_response(&format!(
+                "HTTP request to {} blocked by user",
+                host
+            )))
+        }
+        Err(_) => {
+            // Channel closed (likely timeout or cancel)
+            warn!("HTTP connection {} channel closed for {}", id, host);
+
+            // Notify TUI that the request was cancelled
+            if let Some(ref tx) = control_tx {
+                let msg = ProxyToTui::PermissionCancelled {
+                    id,
+                    reason: "timeout".to_string(),
+                };
+                let _ = tx.try_send(msg);
+            }
+
+            audit.log(AuditEvent::NetworkBlock {
+                domain: host.to_string(),
+                reason: BlockReason::PromptTimeout,
+            });
+
+            Ok(forbidden_response(&format!(
+                "HTTP request to {} blocked: decision timeout",
+                host
+            )))
         }
     }
 }

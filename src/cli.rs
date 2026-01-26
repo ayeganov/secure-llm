@@ -95,6 +95,18 @@ pub enum Commands {
         #[arg(required = true)]
         socket_path: PathBuf,
     },
+
+    /// Internal TUI subprocess (hidden).
+    ///
+    /// This command runs the TUI in a separate process, communicating
+    /// with the main proxy process via Unix socket IPC. It is spawned
+    /// automatically by the main process in a tmux sidecar pane.
+    #[command(name = "internal-tui", hide = true)]
+    InternalTui {
+        /// Path to the Unix socket for IPC with the main process.
+        #[arg(long = "socket-path", required = true)]
+        socket_path: PathBuf,
+    },
 }
 
 impl Cli {
@@ -216,7 +228,25 @@ mod tests {
             Some(Commands::InternalShim { socket_path }) => {
                 assert_eq!(socket_path, PathBuf::from("/tmp/proxy.sock"));
             }
-            None => panic!("Expected InternalShim command"),
+            _ => panic!("Expected InternalShim command"),
+        }
+    }
+
+    #[test]
+    fn test_internal_tui_command() {
+        let cli = Cli::parse_from([
+            "secure-llm",
+            "internal-tui",
+            "--socket-path",
+            "/tmp/tui.sock",
+        ]);
+
+        assert!(cli.tool.is_none());
+        match cli.command {
+            Some(Commands::InternalTui { socket_path }) => {
+                assert_eq!(socket_path, PathBuf::from("/tmp/tui.sock"));
+            }
+            _ => panic!("Expected InternalTui command"),
         }
     }
 }

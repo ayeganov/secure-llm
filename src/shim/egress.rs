@@ -94,29 +94,23 @@ pub async fn run(socket_path: &Path) -> Result<(), ShimError> {
             source: e,
         })?;
 
-    eprintln!(
-        "[shim] Listening on {} -> {}",
-        SHIM_LISTEN_ADDR,
-        socket_path.display()
-    );
+    // Note: We don't log here to avoid interfering with the tool's terminal output.
+    // The shim runs in the sandbox and shares stderr with the tool.
 
     // Accept loop
     loop {
         match listener.accept().await {
-            Ok((tcp_stream, peer_addr)) => {
+            Ok((tcp_stream, _peer_addr)) => {
                 let socket_path = socket_path.to_path_buf();
 
                 // Spawn handler for this connection
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(tcp_stream, &socket_path).await {
-                        // Log to stderr - this is inside the sandbox, separate from tool
-                        eprintln!("[shim] Connection from {} failed: {}", peer_addr, e);
-                    }
+                    // Silently handle connection - errors are expected during normal operation
+                    let _ = handle_connection(tcp_stream, &socket_path).await;
                 });
             }
             Err(e) => {
-                eprintln!("[shim] Accept error: {}", e);
-                // Continue accepting other connections
+                tracing::trace!("Accept error (continuing): {e}");
             }
         }
     }
@@ -146,12 +140,8 @@ where
     B: AsyncRead + AsyncWrite + Unpin,
 {
     match tokio::io::copy_bidirectional(&mut stream_a, &mut stream_b).await {
-        Ok((a_to_b, b_to_a)) => {
-            // Connection completed normally
-            eprintln!(
-                "[shim] Connection complete: {} bytes out, {} bytes in",
-                a_to_b, b_to_a
-            );
+        Ok((_a_to_b, _b_to_a)) => {
+            // Connection completed normally - don't log to avoid terminal interference
             Ok(())
         }
         Err(e) => {
@@ -182,25 +172,20 @@ pub async fn run_with_addr(listen_addr: &str, socket_path: &Path) -> Result<(), 
             source: e,
         })?;
 
-    eprintln!(
-        "[shim] Listening on {} -> {}",
-        listen_addr,
-        socket_path.display()
-    );
+    // Note: We don't log here to avoid interfering with the tool's terminal output.
 
     loop {
         match listener.accept().await {
-            Ok((tcp_stream, peer_addr)) => {
+            Ok((tcp_stream, _peer_addr)) => {
                 let socket_path = socket_path.to_path_buf();
 
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(tcp_stream, &socket_path).await {
-                        eprintln!("[shim] Connection from {} failed: {}", peer_addr, e);
-                    }
+                    // Silently handle connection - errors are expected during normal operation
+                    let _ = handle_connection(tcp_stream, &socket_path).await;
                 });
             }
             Err(e) => {
-                eprintln!("[shim] Accept error: {}", e);
+                tracing::trace!("Accept error (continuing): {e}");
             }
         }
     }
@@ -242,7 +227,7 @@ mod tests {
             Err(ShimError::TcpBind { addr, .. }) => {
                 assert_eq!(addr, "999.999.999.999:8080");
             }
-            _ => panic!("Expected TcpBind error"),
+            _ => unreachable!("Expected TcpBind error"),
         }
     }
 
@@ -266,7 +251,7 @@ mod tests {
             Err(ShimError::UnixConnect { path, .. }) => {
                 assert!(path.contains("definitely-does-not-exist"));
             }
-            _ => panic!("Expected UnixConnect error"),
+            _ => unreachable!("Expected UnixConnect error"),
         }
     }
 

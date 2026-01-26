@@ -1,30 +1,61 @@
-//! Control plane module (Phase 4).
+//! Control plane module for IPC communication between proxy and TUI.
 //!
-//! This module will provide IPC communication between the proxy and TUI:
-//! - Unix domain socket server
-//! - Message serialization (JSON)
-//! - Permission request/response handling
-//! - Port detection event handling
+//! This module provides:
+//! - Protocol definitions for proxy ↔ TUI messaging
+//! - Bidirectional channel management
+//! - Control plane coordinator that routes decisions
+//!
+//! # Architecture
+//!
+//! ```text
+//! ┌─────────────────┐                    ┌─────────────────┐
+//! │     Proxy       │                    │       TUI       │
+//! │  ProxyChannels  │                    │  TuiChannels    │
+//! │                 │    ProxyToTui      │                 │
+//! │  .tx ───────────┼───────────────────>│ .rx             │
+//! │                 │                    │                 │
+//! │  .rx ◄──────────┼────────────────────│ .tx             │
+//! │                 │    TuiToProxy      │                 │
+//! └────────┬────────┘                    └─────────────────┘
+//!          │
+//!          ▼
+//! ┌─────────────────┐
+//! │  ControlPlane   │
+//! │                 │
+//! │  - Routes       │
+//! │    decisions    │
+//! │  - Persists     │
+//! │    "Always"     │
+//! └─────────────────┘
+//! ```
+//!
+//! # Example
+//!
+//! ```ignore
+//! use secure_llm::control::{create_channel_pair, ControlPlane, ProxyToTui};
+//!
+//! // Create channels
+//! let (proxy_channels, tui_channels) = create_channel_pair();
+//!
+//! // Start control plane
+//! let plane = ControlPlane::new(proxy_channels, hold_manager, policy, shutdown_rx);
+//! tokio::spawn(plane.run());
+//!
+//! // TUI receives messages
+//! while let Some(msg) = tui_channels.rx.recv().await {
+//!     // Handle permission requests, port detections, etc.
+//! }
+//! ```
 
-// Phase 4 submodules (to be implemented):
-// pub mod ipc;        // Unix domain socket server
-// pub mod protocol;   // Message types
+pub mod channel;
+pub mod plane;
+pub mod protocol;
+pub mod socket;
 
-/// Placeholder for control plane functionality.
-///
-/// This will be implemented in Phase 4.
-pub struct ControlPlane;
-
-impl ControlPlane {
-    /// Create a new control plane (not yet implemented).
-    #[must_use]
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for ControlPlane {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Re-export main types for convenient access
+pub use channel::{create_channel_pair, create_channel_pair_with_size, ProxyChannels, TuiChannels};
+pub use plane::ControlPlane;
+pub use protocol::{
+    Decision, DetectedPort, EventCategory, LogLevel, PendingPermission, ProxyToTui, TuiToProxy,
+};
+pub use socket::{ControlSocketClient, ControlSocketServer, SocketError, SocketResult};

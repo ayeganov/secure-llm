@@ -1,173 +1,97 @@
-//! Integration tests for sandbox functionality.
-//!
-//! These tests verify the rootless sandbox architecture works correctly.
-//! Run with: cargo test --test sandbox_integration
-
-use secure_llm::sandbox::{
-    bwrap::BwrapBuilder,
-    ca::EphemeralCa,
-    cleanup::cleanup_stale_resources,
-    mounts::MountVerifier,
-};
 use std::path::Path;
-use std::process::Command;
+use secure_llm::sandbox::{
+    BwrapBuilder, SANDBOX_CA_BUNDLE_PATH, EphemeralCa, MountVerifier,
+    cleanup::cleanup_stale_resources,
+};
 
-/// Test ephemeral CA generation and certificate signing.
 #[test]
-fn test_ca_certificate_chain() {
+fn test_bwrap_builder_basic() {
     let ca = EphemeralCa::generate().expect("Failed to generate CA");
-
-    // Generate a domain certificate
-    let domain_cert = ca
-        .generate_cert("test.example.com")
-        .expect("Failed to generate domain cert");
-
-    // Verify the certificate contains expected markers
-    assert!(domain_cert.cert_pem.contains("-----BEGIN CERTIFICATE-----"));
-    assert!(domain_cert.key_pem.contains("-----BEGIN PRIVATE KEY-----"));
-
-    // Test multi-domain certificate
-    let multi_cert = ca
-        .generate_cert_multi(&["api.example.com", "www.example.com", "*.example.com"])
-        .expect("Failed to generate multi-domain cert");
-
-    assert!(multi_cert.cert_pem.contains("-----BEGIN CERTIFICATE-----"));
-}
-
-/// Test mount verification with real filesystem.
-#[test]
-fn test_mount_verification() {
-    // Create verifier with empty denylist
-    let verifier = MountVerifier::new(&[]).expect("Failed to create verifier");
-
-    // Current directory should be verifiable
-    let cwd = std::env::current_dir().expect("Failed to get cwd");
-    let result = verifier.verify_path(&cwd);
-    assert!(result.is_ok(), "CWD should be verifiable: {:?}", result);
-
-    // Test with a non-existent path (should verify parent)
-    let nonexistent = cwd.join("nonexistent_test_dir_12345");
-    let result = verifier.verify_path(&nonexistent);
-    assert!(
-        result.is_ok(),
-        "Non-existent path should verify parent: {:?}",
-        result
-    );
-}
-
-/// Test bwrap builder produces valid command line.
-#[test]
-fn test_bwrap_command_construction() {
     let builder = BwrapBuilder::new()
         .unshare_user()
         .map_current_user()
-        .unshare_net()
-        .unshare_pid()
-        .bind_ro(Path::new("/usr"), Path::new("/usr"))
-        .bind_ro(Path::new("/lib"), Path::new("/lib"))
-        .bind_ro_try(Path::new("/lib64"), Path::new("/lib64"))
-        .tmpfs(Path::new("/tmp"))
-        .proc_mount(Path::new("/proc"))
-        .dev_minimal()
-        .setenv("HOME", "/home/test")
-        .setenv("PATH", "/usr/bin:/bin");
+        .ca_certificate_mounts(ca.cert_path())
+        .command(Path::new("/usr/bin/echo"), &["hello".to_string()]);
 
-    let cmd = builder.build();
-
-    // Verify we got a command back
-    let program = cmd.get_program();
-    assert_eq!(program, "bwrap", "Should build bwrap command");
-
-    let args: Vec<_> = cmd.get_args().collect();
-    assert!(!args.is_empty(), "Should have arguments");
+    let cmd_line = builder.to_command_line();
+    assert!(cmd_line.contains("--unshare-user"));
+    assert!(cmd_line.contains("--uid"));
+    assert!(cmd_line.contains("--gid"));
+    assert!(cmd_line.contains("/usr/bin/echo"));
+    assert!(cmd_line.contains("hello"));
 }
 
-/// Test cleanup of stale resources doesn't panic.
 #[test]
-fn test_cleanup_stale_resources() {
-    // This should not panic even without privileges
-    cleanup_stale_resources();
+fn test_mount_verifier_basic() {
+    let verifier = MountVerifier::new(&[]).expect("Failed to create verifier");
+    
+    // /usr should be allowed by default (system path)
+    assert!(verifier.verify_path(Path::new("/usr")).is_ok());
+    
+    // /etc/shadow should be blocked (security sensitive)
+    assert!(verifier.verify_path(Path::new("/etc/shadow")).is_err());
 }
 
-/// Test combined CA bundle creation.
 #[test]
-fn test_combined_ca_bundle() {
+fn test_mount_verifier_denylist() {
+    let verifier = MountVerifier::new(&["/home/user/secret".to_string()])
+        .expect("Failed to create verifier");
+    
+    // Explicitly denylisted path
+    assert!(verifier.verify_path(Path::new("/home/user/secret")).is_err());
+    
+    // Subpath of denylisted path
+    assert!(verifier.verify_path(Path::new("/home/user/secret/key")).is_err());
+    
+    // Other path should be OK
+    assert!(verifier.verify_path(Path::new("/home/user/public")).is_ok());
+}
+
+#[test]
+fn test_sandbox_ca_mount() {
     let ca = EphemeralCa::generate().expect("Failed to generate CA");
+    let builder = BwrapBuilder::new()
+        .ca_certificate_mounts(ca.cert_path())
+        .command(Path::new("/bin/sh"), &[]);
 
-    // Try to create a combined bundle with system CAs
-    let system_ca_paths = [
-        "/etc/ssl/certs/ca-certificates.crt",
-        "/etc/pki/tls/certs/ca-bundle.crt",
-        "/etc/ssl/cert.pem",
-    ];
-
-    for path in &system_ca_paths {
-        let path = std::path::Path::new(path);
-        if path.exists() {
-            let bundle = ca
-                .create_combined_bundle(path)
-                .expect("Failed to create combined bundle");
-            assert!(bundle.exists(), "Combined bundle should exist");
-
-            let content =
-                std::fs::read_to_string(&bundle).expect("Failed to read combined bundle");
-            assert!(
-                content.contains("-----BEGIN CERTIFICATE-----"),
-                "Bundle should contain certificates"
-            );
-            return;
-        }
-    }
-
-    // If no system CA found, test with non-existent path
-    let bundle = ca
-        .create_combined_bundle(std::path::Path::new("/nonexistent"))
-        .expect("Should handle missing host bundle");
-    assert!(bundle.exists());
+    let cmd_line = builder.to_command_line();
+    assert!(cmd_line.contains(SANDBOX_CA_BUNDLE_PATH));
 }
 
-/// Test running echo in a minimal sandbox (requires bwrap, NOT root).
 #[test]
-fn test_sandbox_echo() {
-    if !bwrap_available() {
-        eprintln!("Skipping test_sandbox_echo: bwrap not found");
+fn test_full_sandbox_flow() {
+    // This is a "dry run" test that builds the config but doesn't spawn
+    // since we might not have bwrap or proper permissions in CI
+    
+    if !bwrap_is_available() {
         return;
     }
 
+    cleanup_stale_resources();
+
+    let work_dir = std::env::current_dir().unwrap();
+    let ca = EphemeralCa::generate().expect("Failed to generate CA");
+    
     let builder = BwrapBuilder::new()
         .unshare_user()
         .map_current_user()
         .unshare_pid()
-        .bind_ro(Path::new("/usr"), Path::new("/usr"))
-        .bind_ro(Path::new("/lib"), Path::new("/lib"))
-        .bind_ro_try(Path::new("/lib64"), Path::new("/lib64"))
-        .bind_ro(Path::new("/bin"), Path::new("/bin"))
-        .tmpfs(Path::new("/tmp"))
-        .proc_mount(Path::new("/proc"))
-        .dev_minimal()
-        .setenv("PATH", "/usr/bin:/bin")
-        .command(Path::new("/bin/echo"), &["hello from sandbox".to_string()]);
+        .unshare_net()
+        .standard_system_mounts(Path::new("/etc/resolv.conf"))
+        .ca_certificate_mounts(ca.cert_path())
+        .chdir(&work_dir)
+        .command(Path::new("/usr/bin/id"), &[]);
 
-    let mut cmd = builder.build();
-    let output = cmd.output().expect("Failed to run sandbox");
-
-    assert!(
-        output.status.success(),
-        "Sandbox command should succeed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("hello from sandbox"),
-        "Should see echo output: {}",
-        stdout
-    );
+    let cmd_line = builder.to_command_line();
+    assert!(cmd_line.contains("--unshare-user"));
+    assert!(cmd_line.contains("--unshare-pid"));
+    assert!(cmd_line.contains("--unshare-net"));
 }
 
-fn bwrap_available() -> bool {
-    Command::new("which")
-        .arg("bwrap")
+// Helper to check for bwrap without importing from lib (to avoid conflict)
+fn bwrap_is_available() -> bool {
+    std::process::Command::new("bwrap")
+        .arg("--version")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)

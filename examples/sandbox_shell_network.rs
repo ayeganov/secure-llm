@@ -40,7 +40,7 @@
 
 use secure_llm::config::NetworkConfig;
 use secure_llm::proxy::{PolicyEngine, ProxyConfig, ProxyServer};
-use secure_llm::sandbox::bwrap::BwrapBuilder;
+use secure_llm::sandbox::BwrapBuilder;
 use secure_llm::sandbox::ca::{find_host_ca_bundle, EphemeralCa};
 use secure_llm::telemetry::AuditLogger;
 use std::path::{Path, PathBuf};
@@ -173,6 +173,7 @@ async fn main() -> std::process::ExitCode {
         headless: true, // Block unknown domains (no TUI in this example)
         prompt_timeout: Duration::from_secs(30),
         audit,
+        control_tx: None, // No TUI in this example
     };
 
     // Start the proxy server
@@ -247,9 +248,7 @@ async fn main() -> std::process::ExitCode {
 
     // The shim command that runs inside the sandbox
     // Note: We mount secure-llm to /opt/secure-llm since /bin is read-only
-    let shim_and_shell = format!(
-        "/opt/secure-llm internal-shim /tmp/proxy.sock & exec /bin/bash --norc"
-    );
+    let shim_and_shell = "/opt/secure-llm internal-shim /tmp/proxy.sock & exec /bin/bash --norc".to_string();
 
     let builder = BwrapBuilder::new()
         // Namespace isolation (rootless!)
@@ -306,7 +305,7 @@ async fn main() -> std::process::ExitCode {
     let mut cmd = builder.build();
 
     // Run the sandbox (blocking)
-    let status = tokio::task::spawn_blocking(move || {
+    let status: std::io::Result<std::process::ExitStatus> = tokio::task::spawn_blocking(move || {
         cmd.stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())

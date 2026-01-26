@@ -114,17 +114,22 @@
 //! let status = handle.wait()?;
 //! ```
 
+pub mod builder;
 pub mod bwrap;
 pub mod ca;
 pub mod cleanup;
+pub mod config;
 pub mod error;
+pub mod handle;
 pub mod mounts;
 
 // Re-export main types for convenience
-pub use bwrap::{
-    bwrap_available, bwrap_version, expand_env_vars, BindMount, BwrapBuilder, EnvContext,
-    SandboxConfig, SandboxHandle, SandboxLauncher, SANDBOX_CA_BUNDLE_PATH,
+pub use builder::BwrapBuilder;
+pub use bwrap::{bwrap_available, bwrap_version, SandboxLauncher};
+pub use config::{
+    expand_env_vars, BindMount, EnvContext, SandboxConfig, SANDBOX_CA_BUNDLE_PATH,
 };
+pub use handle::SandboxHandle;
 pub use ca::{find_host_ca_bundle, DomainCertificate, EphemeralCa, HOST_CA_BUNDLES};
 pub use cleanup::{cleanup_stale_resources, list_stale_resources, StaleResources};
 pub use error::{BwrapError, CaError, MountError, SandboxError};
