@@ -136,12 +136,37 @@ impl GatewayConfig {
     }
 }
 
+/// Default sandbox environment variables for proxy and CA configuration.
+///
+/// These are applied to all sandboxed tools unless overridden by a profile.
+fn default_sandbox_env() -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    // Proxy configuration (both uppercase and lowercase for compatibility)
+    env.insert("HTTP_PROXY".to_string(), "${SANDBOX_PROXY}".to_string());
+    env.insert("HTTPS_PROXY".to_string(), "${SANDBOX_PROXY}".to_string());
+    env.insert("http_proxy".to_string(), "${SANDBOX_PROXY}".to_string());
+    env.insert("https_proxy".to_string(), "${SANDBOX_PROXY}".to_string());
+    // CA certificate configuration for various runtimes
+    env.insert("SSL_CERT_FILE".to_string(), "${SANDBOX_CA_CERT}".to_string());
+    env.insert("NODE_EXTRA_CA_CERTS".to_string(), "${SANDBOX_CA_CERT}".to_string());
+    env.insert("REQUESTS_CA_BUNDLE".to_string(), "${SANDBOX_CA_CERT}".to_string());
+    env
+}
+
 /// Sandbox configuration.
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SandboxConfig {
     /// Additional environment variables to inject into the sandbox.
-    #[serde(default)]
+    #[serde(default = "default_sandbox_env")]
     pub env: HashMap<String, String>,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            env: default_sandbox_env(),
+        }
+    }
 }
 
 impl SandboxConfig {
@@ -323,6 +348,9 @@ pub struct AllowedDomains {
     /// List of allowed domain names.
     #[serde(default)]
     pub allowed: Vec<String>,
+    /// List of blocked domain names.
+    #[serde(default)]
+    pub blocked: Vec<String>,
 }
 
 #[cfg(test)]

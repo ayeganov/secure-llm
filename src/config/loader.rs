@@ -100,26 +100,29 @@ impl ConfigLoader {
             debug!("No user config found at {:?}", self.user_path);
         }
 
-        // Load and merge user allowlist
-        if let Ok(allowlist) = self.load_user_allowlist()
-            && !allowlist.domains.allowed.is_empty()
-        {
-            // Create a minimal config with only the allowlist domains - don't use
-            // Default which would add duplicate graylist entries
-            let allowlist_config = Config {
-                general: config.general.clone(),
-                gateway: config.gateway.clone(),
-                sandbox: Default::default(),
-                network: NetworkConfig {
-                    allowlist: allowlist.domains.allowed,
-                    blocklist: Vec::new(),
-                    graylist: Vec::new(),
-                    host_rewrite: Default::default(),
-                },
-                filesystem: Default::default(),
-            };
-            config.merge(allowlist_config);
-            debug!("Loaded user allowlist from {:?}", self.allowlist_path);
+        // Load and merge user allowlist/blocklist
+        if let Ok(allowlist) = self.load_user_allowlist() {
+            let has_allowed = !allowlist.domains.allowed.is_empty();
+            let has_blocked = !allowlist.domains.blocked.is_empty();
+
+            if has_allowed || has_blocked {
+                // Create a minimal config with only the allowlist/blocklist domains - don't use
+                // Default which would add duplicate graylist entries
+                let allowlist_config = Config {
+                    general: config.general.clone(),
+                    gateway: config.gateway.clone(),
+                    sandbox: Default::default(),
+                    network: NetworkConfig {
+                        allowlist: allowlist.domains.allowed,
+                        blocklist: allowlist.domains.blocked,
+                        graylist: Vec::new(),
+                        host_rewrite: Default::default(),
+                    },
+                    filesystem: Default::default(),
+                };
+                config.merge(allowlist_config);
+                debug!("Loaded user allowlist/blocklist from {:?}", self.allowlist_path);
+            }
         }
 
         // Load and merge additional config file from CLI
@@ -261,6 +264,57 @@ impl ConfigLoader {
             allowlist.domains.allowed.push(domain.to_string());
         }
 
+        self.write_allowlist(&allowlist)
+    }
+
+    /// Remove a domain from the user's persistent allowlist.
+    pub fn remove_from_allowlist(&self, domain: &str) -> Result<(), ConfigError> {
+        let mut allowlist = self.load_user_allowlist().unwrap_or_default();
+        allowlist.domains.allowed.retain(|d| d != domain);
+        self.write_allowlist(&allowlist)?;
+        debug!("Removed domain '{}' from allowlist", domain);
+        Ok(())
+    }
+
+    /// Save a domain to the user's persistent blocklist.
+    pub fn save_to_blocklist(&self, domain: &str) -> Result<(), ConfigError> {
+        let mut allowlist = self.load_user_allowlist().unwrap_or_default();
+
+        // Add domain to blocklist if not already present
+        if !allowlist.domains.blocked.contains(&domain.to_string()) {
+            allowlist.domains.blocked.push(domain.to_string());
+        }
+
+        // Remove from allowed list if present (block takes precedence)
+        allowlist.domains.allowed.retain(|d| d != domain);
+
+        self.write_allowlist(&allowlist)
+    }
+
+    /// Remove a domain from the user's persistent blocklist.
+    pub fn remove_from_blocklist(&self, domain: &str) -> Result<(), ConfigError> {
+        let mut allowlist = self.load_user_allowlist().unwrap_or_default();
+        allowlist.domains.blocked.retain(|d| d != domain);
+        self.write_allowlist(&allowlist)?;
+        debug!("Removed domain '{}' from blocklist", domain);
+        Ok(())
+    }
+
+    /// Clear all entries from the user's persistent allowlist.
+    pub fn clear_allowlist(&self) -> Result<(), ConfigError> {
+        let allowlist = UserAllowlist::default();
+        self.write_allowlist(&allowlist)?;
+        debug!("Cleared all entries from allowlist");
+        Ok(())
+    }
+
+    /// Get the path to the allowlist file.
+    pub fn allowlist_path(&self) -> &std::path::Path {
+        &self.allowlist_path
+    }
+
+    /// Write the allowlist to disk.
+    fn write_allowlist(&self, allowlist: &UserAllowlist) -> Result<(), ConfigError> {
         // Ensure parent directory exists
         if let Some(parent) = self.allowlist_path.parent() {
             fs::create_dir_all(parent).map_err(|e| ConfigError::ReadError {
@@ -270,13 +324,13 @@ impl ConfigLoader {
         }
 
         // Serialize and write
-        let contents = toml::to_string_pretty(&allowlist)?;
+        let contents = toml::to_string_pretty(allowlist)?;
         fs::write(&self.allowlist_path, contents).map_err(|e| ConfigError::ReadError {
             path: self.allowlist_path.clone(),
             source: e,
         })?;
 
-        debug!("Saved domain '{}' to allowlist at {:?}", domain, self.allowlist_path);
+        debug!("Wrote allowlist to {:?}", self.allowlist_path);
         Ok(())
     }
 
@@ -533,5 +587,81 @@ mod tests {
 
         // Should get cursor profile, not claude
         assert_eq!(profile.tool.name, "cursor");
+    }
+
+    #[test]
+    fn test_save_and_load_blocklist() {
+        let dir = tempdir().unwrap();
+        let loader = ConfigLoader::with_paths(
+            dir.path().join("system.toml"),
+            dir.path().join("user.toml"),
+            dir.path().join("allowlist.toml"),
+        );
+
+        // Save a domain to blocklist
+        loader.save_to_blocklist("evil.example.com").unwrap();
+
+        // Load it back
+        let allowlist = loader.load_user_allowlist().unwrap();
+        assert!(allowlist.domains.blocked.contains(&"evil.example.com".to_string()));
+    }
+
+    #[test]
+    fn test_blocklist_removes_from_allowlist() {
+        let dir = tempdir().unwrap();
+        let loader = ConfigLoader::with_paths(
+            dir.path().join("system.toml"),
+            dir.path().join("user.toml"),
+            dir.path().join("allowlist.toml"),
+        );
+
+        // First allow a domain
+        loader.save_to_allowlist("changeable.example.com").unwrap();
+        let allowlist = loader.load_user_allowlist().unwrap();
+        assert!(allowlist.domains.allowed.contains(&"changeable.example.com".to_string()));
+
+        // Now block the same domain - should be removed from allowed
+        loader.save_to_blocklist("changeable.example.com").unwrap();
+        let allowlist = loader.load_user_allowlist().unwrap();
+        assert!(allowlist.domains.blocked.contains(&"changeable.example.com".to_string()));
+        assert!(!allowlist.domains.allowed.contains(&"changeable.example.com".to_string()));
+    }
+
+    #[test]
+    fn test_blocklist_loaded_into_config() {
+        let dir = tempdir().unwrap();
+        let loader = ConfigLoader::with_paths(
+            dir.path().join("system.toml"),
+            dir.path().join("user.toml"),
+            dir.path().join("allowlist.toml"),
+        );
+
+        // Save a domain to blocklist
+        loader.save_to_blocklist("blocked.example.com").unwrap();
+
+        // Load config and verify blocked domain is in network.blocklist
+        let cli = create_test_cli();
+        let config = loader.load(&cli).unwrap();
+        assert!(config.network.blocklist.contains(&"blocked.example.com".to_string()));
+    }
+
+    #[test]
+    fn test_remove_from_blocklist() {
+        let dir = tempdir().unwrap();
+        let loader = ConfigLoader::with_paths(
+            dir.path().join("system.toml"),
+            dir.path().join("user.toml"),
+            dir.path().join("allowlist.toml"),
+        );
+
+        // Save a domain to blocklist
+        loader.save_to_blocklist("temp.example.com").unwrap();
+        let allowlist = loader.load_user_allowlist().unwrap();
+        assert!(allowlist.domains.blocked.contains(&"temp.example.com".to_string()));
+
+        // Remove it
+        loader.remove_from_blocklist("temp.example.com").unwrap();
+        let allowlist = loader.load_user_allowlist().unwrap();
+        assert!(!allowlist.domains.blocked.contains(&"temp.example.com".to_string()));
     }
 }

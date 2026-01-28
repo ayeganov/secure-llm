@@ -246,9 +246,11 @@ impl ControlPlane {
                     }
                 }
                 Decision::Block => {
-                    // TODO: Implement save_to_blocklist in ConfigLoader
-                    // For now, just record in session policy (already done in handle_permission_decision)
-                    info!("'Always Block' for {} recorded for session (persistent blocklist not yet implemented)", domain);
+                    if let Err(e) = loader.save_to_blocklist(domain) {
+                        warn!("Failed to persist block for {}: {}", domain, e);
+                    } else {
+                        info!("Persisted 'Always Block' for {}", domain);
+                    }
                 }
             }
         } else {

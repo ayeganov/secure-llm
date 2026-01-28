@@ -3,6 +3,19 @@
 //! This module orchestrates the construction and spawning of Bubblewrap sandboxes.
 
 use std::path::{Path, PathBuf};
+
+/// Escape a string for safe use in a POSIX shell command.
+///
+/// Uses single-quote escaping which is the safest approach for arbitrary strings.
+/// Characters that are safe without quoting are passed through unchanged.
+fn shell_escape(s: &str) -> String {
+    // If the string contains only safe characters, no escaping needed
+    if s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:=@".contains(c)) {
+        return s.to_string();
+    }
+    // Use single quotes, escaping any embedded single quotes as '\''
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
 use std::process::{Command, Stdio};
 use tracing::{debug, info};
 
@@ -102,13 +115,11 @@ impl SandboxLauncher {
             }
 
             let tool_cmd = if config.tool_args.is_empty() {
-                config.tool_binary.display().to_string()
+                shell_escape(&config.tool_binary.display().to_string())
             } else {
-                format!(
-                    "{} {}",
-                    config.tool_binary.display(),
-                    config.tool_args.join(" ")
-                )
+                let escaped_binary = shell_escape(&config.tool_binary.display().to_string());
+                let escaped_args: Vec<String> = config.tool_args.iter().map(|a| shell_escape(a)).collect();
+                format!("{} {}", escaped_binary, escaped_args.join(" "))
             };
 
             // Build shell command with optional reverse shim

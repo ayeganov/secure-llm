@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, watch, Mutex};
 use tracing::{debug, error, info, warn};
 
 use crate::cli::Cli;
-use crate::config::{Config, ToolProfile};
+use crate::config::{Config, ConfigLoader, ToolProfile};
 use crate::control::{ControlPlane, ControlSocketServer, ProxyToTui};
 use crate::portmon::{PortBridgeManager, PortDetector};
 use crate::proxy::{hold::ConnectionHoldManager, PolicyEngine, ProxyConfig, ProxyServer};
@@ -23,8 +23,123 @@ use crate::sandbox::{
 };
 use crate::tui::{create_multiplexer, SidecarOptions, SidecarPaneHandle};
 
+/// Action to take after reviewing the startup allowlist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AllowlistAction {
+    /// Proceed with the existing allowlist.
+    Proceed,
+    /// User requested to quit.
+    Quit,
+}
+
+/// Review the startup allowlist and let the user clear/edit it.
+///
+/// Returns `AllowlistAction::Proceed` to continue or `AllowlistAction::Quit` to exit.
+fn review_startup_allowlist(config_loader: &ConfigLoader, headless: bool) -> Result<AllowlistAction> {
+    // Skip review in headless mode
+    if headless {
+        return Ok(AllowlistAction::Proceed);
+    }
+
+    // Load existing allowlist
+    let allowlist = config_loader.load_user_allowlist().unwrap_or_default();
+
+    // Skip if allowlist is empty
+    if allowlist.domains.allowed.is_empty() {
+        return Ok(AllowlistAction::Proceed);
+    }
+
+    // Display the allowlist
+    println!("\n\x1b[1;36m━━━ Persistent Allowlist ━━━\x1b[0m");
+    println!("The following domains are permanently allowed:");
+    for (i, domain) in allowlist.domains.allowed.iter().enumerate() {
+        println!("  \x1b[32m{}\x1b[0m. {}", i + 1, domain);
+    }
+    println!();
+    println!("  \x1b[1m[Enter]\x1b[0m Proceed with existing allowlist");
+    println!("  \x1b[1m[c]\x1b[0m     Clear all entries");
+    println!("  \x1b[1m[e]\x1b[0m     Edit (remove specific entries)");
+    println!("  \x1b[1m[q]\x1b[0m     Quit");
+    print!("\n> ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+
+    // Read user input
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let input = input.trim().to_lowercase();
+
+    match input.as_str() {
+        "" => Ok(AllowlistAction::Proceed),
+        "c" => {
+            config_loader.clear_allowlist()?;
+            println!("\x1b[33mCleared all entries from allowlist.\x1b[0m\n");
+            Ok(AllowlistAction::Proceed)
+        }
+        "e" => {
+            edit_allowlist(config_loader, &allowlist.domains.allowed)?;
+            Ok(AllowlistAction::Proceed)
+        }
+        "q" => Ok(AllowlistAction::Quit),
+        _ => {
+            println!("\x1b[33mUnknown option, proceeding with existing allowlist.\x1b[0m\n");
+            Ok(AllowlistAction::Proceed)
+        }
+    }
+}
+
+/// Interactive editing of the allowlist (remove specific entries).
+fn edit_allowlist(config_loader: &ConfigLoader, domains: &[String]) -> Result<()> {
+    println!("\nEnter numbers to remove (comma-separated), or press Enter to cancel:");
+    print!("> ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let input = input.trim();
+
+    if input.is_empty() {
+        println!("\x1b[33mNo changes made.\x1b[0m\n");
+        return Ok(());
+    }
+
+    // Parse numbers
+    let mut to_remove: Vec<usize> = Vec::new();
+    for part in input.split(',') {
+        if let Ok(num) = part.trim().parse::<usize>() {
+            if num > 0 && num <= domains.len() {
+                to_remove.push(num - 1); // Convert to 0-based index
+            }
+        }
+    }
+
+    // Remove domains in reverse order to maintain indices
+    to_remove.sort();
+    to_remove.dedup();
+    for &idx in to_remove.iter().rev() {
+        if idx < domains.len() {
+            config_loader.remove_from_allowlist(&domains[idx])?;
+            println!("\x1b[31mRemoved:\x1b[0m {}", domains[idx]);
+        }
+    }
+
+    if !to_remove.is_empty() {
+        println!();
+    }
+
+    Ok(())
+}
+
 /// Run the sandbox orchestration.
-pub fn run_sandbox(cli: &Cli, config: &Config, profile: &ToolProfile) -> Result<()> {
+pub fn run_sandbox(cli: &Cli, config: &Config, profile: &ToolProfile, config_loader: ConfigLoader) -> Result<()> {
+    // Review startup allowlist (user can clear/edit before proceeding)
+    match review_startup_allowlist(&config_loader, cli.headless)? {
+        AllowlistAction::Proceed => {}
+        AllowlistAction::Quit => {
+            info!("User chose to quit during allowlist review");
+            return Ok(());
+        }
+    }
+
     // Check that bwrap is available
     if !crate::sandbox::bwrap_available() {
         anyhow::bail!(
@@ -176,6 +291,7 @@ pub fn run_sandbox(cli: &Cli, config: &Config, profile: &ToolProfile) -> Result<
                     let control_policy = policy.clone();
                     let control_hold_manager = hold_manager.clone();
                     let control_bridge_manager = bridge_manager.clone();
+                    let control_config_loader = config_loader;
 
                     let handle = rt.spawn(async move {
                         let accept_result = tokio::time::timeout(
@@ -195,6 +311,7 @@ pub fn run_sandbox(cli: &Cli, config: &Config, profile: &ToolProfile) -> Result<
                                     control_policy,
                                     control_shutdown_rx,
                                 )
+                                .with_config_loader(control_config_loader)
                                 .with_bridge_manager(control_bridge_manager)
                                 .with_port_events(port_event_rx);
                                 control_plane.run().await;
@@ -247,7 +364,11 @@ pub fn run_sandbox(cli: &Cli, config: &Config, profile: &ToolProfile) -> Result<
         work_dir: work_dir.clone(),
         proxy_addr: "http://127.0.0.1:8080".to_string(),
     };
-    let env = expand_env_vars(&profile.environment, &env_context);
+    // Merge base sandbox env (from config) with profile-specific env
+    // Profile env takes precedence over base config
+    let mut merged_env = config.sandbox.env.clone();
+    merged_env.extend(profile.environment.clone());
+    let env = expand_env_vars(&merged_env, &env_context);
 
     let mut bind_ro: Vec<BindMount> = config
         .filesystem

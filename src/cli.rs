@@ -14,6 +14,13 @@ use std::path::PathBuf;
 #[command(name = "secure-llm")]
 #[command(author, version, about, long_about = None)]
 #[command(propagate_version = true)]
+#[command(after_help = "\
+EXAMPLES:
+    secure-llm claude                    Launch Claude Code
+    secure-llm claude -- --help          Show Claude's help
+    secure-llm cursor -- --workspace=.   Launch Cursor with args
+    secure-llm -p 3000:3000 claude       Pre-map port, then launch
+")]
 pub struct Cli {
     /// Subcommand to run (or omit for normal sandbox mode).
     #[command(subcommand)]
@@ -28,10 +35,12 @@ pub struct Cli {
     /// Required unless using a subcommand like `internal-shim`.
     pub tool: Option<String>,
 
-    /// Arguments to pass to the tool.
+    /// Arguments to pass to the tool (after `--` separator).
     ///
-    /// All arguments after the tool name are passed through to the wrapped
-    /// tool without modification.
+    /// Use `--` to separate secure-llm options from tool arguments.
+    /// This is required for flags like --help or -h to reach the tool.
+    ///
+    /// Example: secure-llm claude -- --help
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub tool_args: Vec<String>,
 
@@ -186,11 +195,26 @@ mod tests {
 
     #[test]
     fn test_cli_parse_with_args() {
-        // Note: Using "--foo" instead of "--help" because clap intercepts --help
-        // In production, tool args like "--help" would need to come after "--"
-        let cli = Cli::parse_from(["secure-llm", "claude", "--foo", "extra"]);
+        // Args without leading dashes work without the -- separator
+        let cli = Cli::parse_from(["secure-llm", "claude", "file.txt", "extra"]);
         assert_eq!(cli.tool, Some("claude".to_string()));
-        assert_eq!(cli.tool_args, vec!["--foo", "extra"]);
+        assert_eq!(cli.tool_args, vec!["file.txt", "extra"]);
+    }
+
+    #[test]
+    fn test_cli_parse_with_tool_help() {
+        // Use -- separator to pass flags like -h to the tool
+        let cli = Cli::parse_from(["secure-llm", "claude", "--", "-h"]);
+        assert_eq!(cli.tool, Some("claude".to_string()));
+        assert_eq!(cli.tool_args, vec!["-h"]);
+    }
+
+    #[test]
+    fn test_cli_parse_with_tool_long_help() {
+        // Use -- separator to pass --help to the tool
+        let cli = Cli::parse_from(["secure-llm", "claude", "--", "--help"]);
+        assert_eq!(cli.tool, Some("claude".to_string()));
+        assert_eq!(cli.tool_args, vec!["--help"]);
     }
 
     #[test]

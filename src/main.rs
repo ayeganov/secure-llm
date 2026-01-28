@@ -83,7 +83,7 @@ fn main() -> Result<()> {
     });
 
     // Run the sandbox - this is the main orchestration
-    let result = secure_llm::orchestrator::run_sandbox(&cli, &config, &profile);
+    let result = secure_llm::orchestrator::run_sandbox(&cli, &config, &profile, config_loader);
 
     // Calculate session duration
     let duration_sec = session_start.elapsed().as_secs();
