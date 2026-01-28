@@ -4,19 +4,21 @@
 //! to launch and manage the secure sandbox.
 
 use anyhow::{Context, Result};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Mutex};
 use tracing::{debug, error, info, warn};
 
 use crate::cli::Cli;
 use crate::config::{Config, ToolProfile};
 use crate::control::{ControlPlane, ControlSocketServer, ProxyToTui};
+use crate::portmon::{PortBridgeManager, PortDetector};
 use crate::proxy::{hold::ConnectionHoldManager, PolicyEngine, ProxyConfig, ProxyServer};
 use crate::sandbox::{
     BindMount, EnvContext, expand_env_vars, MountVerifier, SandboxConfig, SandboxLauncher,
-    SANDBOX_CA_BUNDLE_PATH,
+    SANDBOX_CA_BUNDLE_PATH, DEFAULT_MAX_PORT_BRIDGES,
     ca::{EphemeralCa, find_host_ca_bundle},
 };
 use crate::tui::{create_multiplexer, SidecarOptions, SidecarPaneHandle};
@@ -121,6 +123,22 @@ pub fn run_sandbox(cli: &Cli, config: &Config, profile: &ToolProfile) -> Result<
         }
     });
 
+    // Create portbridge directory with restricted permissions (mode 0700)
+    let portbridge_dir = session_dir.path().join("portbridge");
+    std::fs::create_dir_all(&portbridge_dir)
+        .context("Failed to create portbridge directory")?;
+    std::fs::set_permissions(&portbridge_dir, std::fs::Permissions::from_mode(0o700))
+        .context("Failed to set portbridge directory permissions")?;
+    debug!("Created portbridge directory: {:?}", portbridge_dir);
+
+    // Create port event channel (sender will be used by detector, receiver by control plane)
+    let (port_event_tx, port_event_rx) = mpsc::channel(32);
+
+    // Create bridge manager (will be connected after sandbox starts)
+    let bridge_manager = Arc::new(Mutex::new(
+        PortBridgeManager::new(portbridge_dir.clone(), DEFAULT_MAX_PORT_BRIDGES)
+    ));
+
     // Setup TUI sidecar and control plane
     let (control_handle, _sidecar_pane): (_, Option<Box<dyn SidecarPaneHandle>>) =
         if !cli.headless {
@@ -157,6 +175,7 @@ pub fn run_sandbox(cli: &Cli, config: &Config, profile: &ToolProfile) -> Result<
                     let control_shutdown_rx = shutdown_rx.clone();
                     let control_policy = policy.clone();
                     let control_hold_manager = hold_manager.clone();
+                    let control_bridge_manager = bridge_manager.clone();
 
                     let handle = rt.spawn(async move {
                         let accept_result = tokio::time::timeout(
@@ -175,7 +194,9 @@ pub fn run_sandbox(cli: &Cli, config: &Config, profile: &ToolProfile) -> Result<
                                     control_hold_manager,
                                     control_policy,
                                     control_shutdown_rx,
-                                );
+                                )
+                                .with_bridge_manager(control_bridge_manager)
+                                .with_port_events(port_event_rx);
                                 control_plane.run().await;
                             }
                             _ => {
@@ -257,6 +278,8 @@ pub fn run_sandbox(cli: &Cli, config: &Config, profile: &ToolProfile) -> Result<
         ca_bundle_path,
         resolv_conf_path,
         proxy_socket_path: Some(socket_path),
+        portbridge_dir: Some(portbridge_dir.clone()),
+        max_port_bridges: DEFAULT_MAX_PORT_BRIDGES,
         extra_flags: vec![],
     };
 
@@ -268,12 +291,70 @@ pub fn run_sandbox(cli: &Cli, config: &Config, profile: &ToolProfile) -> Result<
 
     info!("Sandbox started with PID: {}", handle.pid);
 
+    // Start port detector (runs on host, reads /proc/<pid>/net/tcp)
+    let detector = PortDetector::new(handle.pid, Duration::from_secs(2));
+    let detector_shutdown = shutdown_rx.clone();
+
+    let detector_handle = rt.spawn(async move {
+        detector.run(port_event_tx, detector_shutdown).await;
+    });
+
+    // Connect bridge manager to reverse shim (with retry)
+    let bridge_manager_clone = bridge_manager.clone();
+    let bridge_connect_handle = rt.spawn(async move {
+        // Wait for reverse shim to start
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let mut manager = bridge_manager_clone.lock().await;
+        match manager.connect_control().await {
+            Ok(()) => {
+                info!("Connected to reverse shim control socket");
+            }
+            Err(e) => {
+                warn!("Failed to connect to reverse shim control socket: {}", e);
+            }
+        }
+    });
+
+    // Handle pre-configured port mappings (--publish flag)
+    let port_mappings = cli.port_mappings();
+    if !port_mappings.is_empty() {
+        let bridge_manager_publish = bridge_manager.clone();
+        let mappings = port_mappings.clone();
+        rt.spawn(async move {
+            // Wait for bridge manager connection
+            tokio::time::sleep(Duration::from_secs(1)).await;
+
+            let mut manager = bridge_manager_publish.lock().await;
+            if manager.is_connected() {
+                for (host_port, container_port) in mappings {
+                    if let Err(e) = manager.start_bridge(host_port, container_port).await {
+                        warn!(
+                            "Failed to start pre-configured port bridge {}:{}: {}",
+                            host_port, container_port, e
+                        );
+                    } else {
+                        info!("Started pre-configured port bridge {}:{}", host_port, container_port);
+                    }
+                }
+            }
+        });
+    }
+
     let status = handle.wait().context("Failed to wait for sandbox")?;
     let _ = shutdown_tx.send(true);
+
+    // Shutdown bridge manager
+    {
+        let manager = rt.block_on(async { bridge_manager.lock().await });
+        manager.shutdown_all();
+    }
 
     rt.block_on(async {
         let _ = tokio::time::timeout(Duration::from_secs(2), proxy_handle).await;
         let _ = tokio::time::timeout(Duration::from_secs(1), control_handle).await;
+        let _ = tokio::time::timeout(Duration::from_secs(1), detector_handle).await;
+        let _ = tokio::time::timeout(Duration::from_millis(500), bridge_connect_handle).await;
     });
 
     if status.success() {

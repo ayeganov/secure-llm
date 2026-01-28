@@ -8,7 +8,7 @@ description = "Anthropic Claude Code CLI - AI-powered coding assistant"
 
 [environment]
 # Redirect Claude's API calls to corporate gateway
-ANTHROPIC_BASE_URL = "https://llm-gateway.corp/v1/anthropic"
+#ANTHROPIC_BASE_URL = "https://llm-gateway.corp/v1/anthropic"
 ANTHROPIC_BEDROCK_BASE_URL="https://llm-proxy.us-east-2.ops.infra.intelligence.webex.com/bedrock/v1"
 
 # Proxy configuration for network traffic

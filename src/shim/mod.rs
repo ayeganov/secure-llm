@@ -40,6 +40,8 @@
 //! - **Transparent to tools**: Tools just see HTTP_PROXY=127.0.0.1:8080
 
 pub mod egress;
+pub mod reverse;
 
-// Re-export main entry point
+// Re-export main entry points
 pub use egress::run;
+pub use reverse::run as run_reverse;

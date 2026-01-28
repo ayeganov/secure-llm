@@ -16,7 +16,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use secure_llm::proxy::tls::{CertificateCache, create_tls_acceptor, create_tls_connector};
 //! use secure_llm::sandbox::ca::EphemeralCa;
 //! use std::sync::Arc;
@@ -29,6 +30,8 @@
 //!
 //! // For connecting to upstream servers
 //! let connector = create_tls_connector()?;
+//! # Ok(())
+//! # }
 //! ```
 
 use super::error::ProxyError;

@@ -18,7 +18,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use secure_llm::portmon::forwarder::{PortForwardManager, ForwardConfig};
 //! use std::net::Ipv4Addr;
 //!
@@ -32,6 +33,8 @@
 //!
 //! // Shutdown all
 //! manager.shutdown_all();
+//! # Ok(())
+//! # }
 //! ```
 
 use super::error::PortMonError;

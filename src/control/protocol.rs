@@ -123,6 +123,31 @@ pub enum ProxyToTui {
         /// Reason for cancellation.
         reason: String,
     },
+    /// A port bridge was successfully started.
+    PortBridgeStarted {
+        /// The ID of the original port detection.
+        id: Uuid,
+        /// The host port being listened on.
+        host_port: u16,
+        /// The container port being forwarded to.
+        container_port: u16,
+    },
+    /// A port bridge was stopped.
+    PortBridgeStopped {
+        /// The host port that was being listened on.
+        host_port: u16,
+        /// The container port that was being forwarded to.
+        container_port: u16,
+        /// Reason for stopping (e.g., "app closed", "manual", "error").
+        reason: String,
+    },
+    /// A port that was being monitored has closed.
+    PortClosed {
+        /// The ID of the port detection.
+        id: Uuid,
+        /// The port number.
+        port: u16,
+    },
     /// Signal that the proxy is shutting down.
     Shutdown,
 }
@@ -147,6 +172,11 @@ pub enum TuiToProxy {
         bridge: bool,
         /// The host port to forward to (if bridging).
         host_port: Option<u16>,
+    },
+    /// User requested to stop a port bridge.
+    StopBridge {
+        /// The ID of the port detection.
+        id: Uuid,
     },
     /// TUI is shutting down.
     TuiShutdown,

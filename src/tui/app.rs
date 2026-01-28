@@ -259,6 +259,12 @@ impl TuiApp {
 
         let idx = self.port_selection.min(self.detected_ports.len() - 1);
         let port_info = &self.detected_ports[idx];
+
+        // Don't bridge if already bridged
+        if port_info.forwarded {
+            return;
+        }
+
         let id = port_info.id;
         let port = port_info.port;
 
@@ -277,6 +283,38 @@ impl TuiApp {
                 LogLevel::Info,
                 EventCategory::Port,
                 format!("Bridging port {}", port),
+            );
+        }
+    }
+
+    /// Stop bridging the currently selected port.
+    pub async fn stop_selected_bridge(&mut self) {
+        if self.detected_ports.is_empty() {
+            return;
+        }
+
+        let idx = self.port_selection.min(self.detected_ports.len() - 1);
+        let port_info = &self.detected_ports[idx];
+
+        // Only stop if currently bridged
+        if !port_info.forwarded {
+            return;
+        }
+
+        let id = port_info.id;
+        let port = port_info.port;
+
+        let msg = TuiToProxy::StopBridge { id };
+
+        if self.transport.send(msg).await.is_ok() {
+            if let Some(p) = self.detected_ports.get_mut(idx) {
+                p.forwarded = false;
+            }
+
+            self.add_log(
+                LogLevel::Info,
+                EventCategory::Port,
+                format!("Stopping bridge for port {}", port),
             );
         }
     }
@@ -395,6 +433,79 @@ impl TuiApp {
                     } else {
                         self.permission_selection = 0;
                     }
+                }
+            }
+            ProxyToTui::PortBridgeStarted {
+                id,
+                host_port,
+                container_port,
+            } => {
+                debug!(
+                    "Port bridge started: host:{} -> container:{}",
+                    host_port, container_port
+                );
+
+                // Update the detected port's forwarded status
+                if let Some(port) = self.detected_ports.iter_mut().find(|p| p.id == id) {
+                    port.forwarded = true;
+                }
+
+                self.add_log(
+                    LogLevel::Info,
+                    EventCategory::Port,
+                    format!(
+                        "Port bridge started: localhost:{} -> sandbox:{}",
+                        host_port, container_port
+                    ),
+                );
+            }
+            ProxyToTui::PortBridgeStopped {
+                host_port,
+                container_port,
+                reason,
+            } => {
+                debug!(
+                    "Port bridge stopped: host:{} -> container:{} ({})",
+                    host_port, container_port, reason
+                );
+
+                // Update the detected port's forwarded status
+                if let Some(port) = self
+                    .detected_ports
+                    .iter_mut()
+                    .find(|p| p.port == container_port)
+                {
+                    port.forwarded = false;
+                }
+
+                self.add_log(
+                    LogLevel::Info,
+                    EventCategory::Port,
+                    format!(
+                        "Port bridge stopped: localhost:{} -> sandbox:{} ({})",
+                        host_port, container_port, reason
+                    ),
+                );
+            }
+            ProxyToTui::PortClosed { id, port } => {
+                debug!("Port {} closed", port);
+
+                // Remove the port from detected list
+                if let Some(pos) = self.detected_ports.iter().position(|p| p.id == id) {
+                    self.detected_ports.remove(pos);
+
+                    if !self.detected_ports.is_empty() {
+                        self.port_selection =
+                            self.port_selection.min(self.detected_ports.len() - 1);
+                    } else {
+                        self.port_selection = 0;
+                    }
+
+                    self.add_log(
+                        LogLevel::Info,
+                        EventCategory::Port,
+                        format!("Port {} closed", port),
+                    );
                 }
             }
             ProxyToTui::Shutdown => {

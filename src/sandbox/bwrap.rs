@@ -96,6 +96,11 @@ impl SandboxLauncher {
             })?;
             builder = builder.bind_ro(&self_exe, Path::new("/opt/secure-llm"));
 
+            // Bind-mount portbridge directory if configured
+            if let Some(ref portbridge_dir) = config.portbridge_dir {
+                builder = builder.bind_rw(portbridge_dir, Path::new("/tmp/portbridge"));
+            }
+
             let tool_cmd = if config.tool_args.is_empty() {
                 config.tool_binary.display().to_string()
             } else {
@@ -105,10 +110,21 @@ impl SandboxLauncher {
                     config.tool_args.join(" ")
                 )
             };
-            let shell_cmd = format!(
-                "/opt/secure-llm internal-shim /tmp/proxy.sock & exec {}",
-                tool_cmd
-            );
+
+            // Build shell command with optional reverse shim
+            let shell_cmd = if config.portbridge_dir.is_some() {
+                format!(
+                    "/opt/secure-llm internal-reverse-shim /tmp/portbridge {} & \
+                     /opt/secure-llm internal-shim /tmp/proxy.sock & \
+                     exec {}",
+                    config.max_port_bridges, tool_cmd
+                )
+            } else {
+                format!(
+                    "/opt/secure-llm internal-shim /tmp/proxy.sock & exec {}",
+                    tool_cmd
+                )
+            };
 
             builder = builder.command(Path::new("/bin/sh"), &["-c".to_string(), shell_cmd]);
         } else {

@@ -13,21 +13,6 @@
 //! 1. Accept TLS from client using our dynamically generated certificate
 //! 2. Connect to upstream server with real TLS
 //! 3. Forward data bidirectionally between client and upstream
-//!
-//! # Example
-//!
-//! ```ignore
-//! use secure_llm::proxy::connect::handle_connect;
-//!
-//! // Called from proxy server when CONNECT request is received
-//! let response = handle_connect(
-//!     request,
-//!     cert_cache,
-//!     policy_engine,
-//!     hold_manager,
-//!     headless,
-//! ).await?;
-//! ```
 
 use super::error::ProxyError;
 use super::hold::{ConnectionDecision, ConnectionHoldManager};

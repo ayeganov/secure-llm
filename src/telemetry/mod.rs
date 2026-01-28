@@ -11,7 +11,8 @@
 //!
 //! # Usage
 //!
-//! ```ignore
+//! ```no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use secure_llm::telemetry::{self, AuditEvent};
 //!
 //! // Initialize at startup
@@ -23,6 +24,8 @@
 //!     tool: "claude".to_string(),
 //!     pid: std::process::id(),
 //! });
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Event Format

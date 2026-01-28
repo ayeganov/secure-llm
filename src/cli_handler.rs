@@ -3,7 +3,7 @@
 //! This module handles lightweight subcommands like the internal shim and TUI.
 
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::sync::watch;
 use tracing::error;
 
@@ -27,10 +27,26 @@ pub fn handle_command(command: Commands) -> Result<()> {
                     .map_err(|e| anyhow::anyhow!(e))
             })
         }
-        Commands::InternalTui { socket_path } => {
-            run_tui_subprocess(&socket_path)
-        }
+        Commands::InternalTui { socket_path } => run_tui_subprocess(&socket_path),
+        Commands::InternalReverseShim {
+            bridge_dir,
+            max_slots,
+        } => run_reverse_shim(&bridge_dir, max_slots),
     }
+}
+
+/// Run the reverse shim daemon inside the sandbox.
+fn run_reverse_shim(bridge_dir: &Path, max_slots: u8) -> Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("Failed to create tokio runtime")?;
+
+    rt.block_on(async {
+        shim::run_reverse(bridge_dir, max_slots)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+    })
 }
 
 /// Run the TUI as a subprocess.

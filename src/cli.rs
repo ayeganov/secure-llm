@@ -107,6 +107,22 @@ pub enum Commands {
         #[arg(long = "socket-path", required = true)]
         socket_path: PathBuf,
     },
+
+    /// Internal reverse shim daemon for port bridging (hidden).
+    ///
+    /// This command runs inside the sandbox to accept incoming connections
+    /// from the host and forward them to local applications. It listens
+    /// on pre-allocated Unix sockets and creates TCP connections to apps.
+    #[command(name = "internal-reverse-shim", hide = true)]
+    InternalReverseShim {
+        /// Path to the portbridge socket directory.
+        #[arg(required = true)]
+        bridge_dir: PathBuf,
+
+        /// Maximum number of concurrent port bridges.
+        #[arg(default_value = "8")]
+        max_slots: u8,
+    },
 }
 
 impl Cli {
@@ -249,4 +265,47 @@ mod tests {
             _ => panic!("Expected InternalTui command"),
         }
     }
+
+    #[test]
+    fn test_internal_reverse_shim_command() {
+        let cli = Cli::parse_from([
+            "secure-llm",
+            "internal-reverse-shim",
+            "/tmp/portbridge",
+            "4",
+        ]);
+
+        assert!(cli.tool.is_none());
+        match cli.command {
+            Some(Commands::InternalReverseShim {
+                bridge_dir,
+                max_slots,
+            }) => {
+                assert_eq!(bridge_dir, PathBuf::from("/tmp/portbridge"));
+                assert_eq!(max_slots, 4);
+            }
+            _ => panic!("Expected InternalReverseShim command"),
+        }
+    }
+
+    #[test]
+    fn test_internal_reverse_shim_command_default_slots() {
+        let cli = Cli::parse_from([
+            "secure-llm",
+            "internal-reverse-shim",
+            "/tmp/portbridge",
+        ]);
+
+        match cli.command {
+            Some(Commands::InternalReverseShim {
+                bridge_dir,
+                max_slots,
+            }) => {
+                assert_eq!(bridge_dir, PathBuf::from("/tmp/portbridge"));
+                assert_eq!(max_slots, 8); // default value
+            }
+            _ => panic!("Expected InternalReverseShim command"),
+        }
+    }
+
 }

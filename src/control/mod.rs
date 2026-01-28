@@ -28,24 +28,6 @@
 //! │    "Always"     │
 //! └─────────────────┘
 //! ```
-//!
-//! # Example
-//!
-//! ```ignore
-//! use secure_llm::control::{create_channel_pair, ControlPlane, ProxyToTui};
-//!
-//! // Create channels
-//! let (proxy_channels, tui_channels) = create_channel_pair();
-//!
-//! // Start control plane
-//! let plane = ControlPlane::new(proxy_channels, hold_manager, policy, shutdown_rx);
-//! tokio::spawn(plane.run());
-//!
-//! // TUI receives messages
-//! while let Some(msg) = tui_channels.rx.recv().await {
-//!     // Handle permission requests, port detections, etc.
-//! }
-//! ```
 
 pub mod channel;
 pub mod plane;

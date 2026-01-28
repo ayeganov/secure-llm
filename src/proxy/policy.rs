@@ -21,7 +21,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use secure_llm::proxy::policy::{PolicyEngine, PolicyDecision};
 //! use secure_llm::config::NetworkConfig;
 //!

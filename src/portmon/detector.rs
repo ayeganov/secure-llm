@@ -20,11 +20,13 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() {
 //! use secure_llm::portmon::detector::{PortDetector, PortEvent, PortState};
 //! use std::time::Duration;
 //! use tokio::sync::mpsc;
 //!
+//! let sandbox_pid = std::process::id(); // In practice, this is the sandbox PID
 //! let detector = PortDetector::new(sandbox_pid, Duration::from_secs(2));
 //! let (tx, mut rx) = mpsc::channel(32);
 //! let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -38,11 +40,14 @@
 //!         _ => {}
 //!     }
 //! }
+//! # }
 //! ```
 
 use super::error::PortMonError;
 use std::collections::HashMap;
+use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::path::Path;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, trace};
@@ -86,12 +91,11 @@ pub struct PortEvent {
 ///
 /// Scans `/proc/<pid>/net/tcp` and `/proc/<pid>/net/tcp6` for listening sockets.
 pub struct PortDetector {
-    /// PID of the sandbox process.
-    ///
-    /// **Critical**: We use PID, not netns name, because reading via
-    /// `ip netns exec` requires root, but /proc/<pid>/net/* is readable
-    /// by the user who spawned the process.
-    sandbox_pid: u32,
+    /// PID of the sandbox wrapper process (e.g., bwrap).
+    wrapper_pid: u32,
+    /// PID of a process actually inside the sandbox network namespace.
+    /// This is resolved lazily because child processes may not exist immediately.
+    namespace_pid: Option<u32>,
     /// Previously seen ports (by inode to handle port reuse).
     known_ports: HashMap<u64, ListeningPort>,
     /// Polling interval.
@@ -103,11 +107,17 @@ impl PortDetector {
     ///
     /// # Arguments
     ///
-    /// * `sandbox_pid` - PID of the sandbox process (e.g., bwrap's PID or a child process)
+    /// * `sandbox_pid` - PID of the sandbox wrapper process (e.g., bwrap's PID)
     /// * `poll_interval` - How often to scan for port changes
+    ///
+    /// # Note
+    ///
+    /// The detector will automatically find a child process that's inside the
+    /// sandbox's network namespace, since bwrap itself may stay in the host namespace.
     pub fn new(sandbox_pid: u32, poll_interval: Duration) -> Self {
         Self {
-            sandbox_pid,
+            wrapper_pid: sandbox_pid,
+            namespace_pid: None,
             known_ports: HashMap::new(),
             poll_interval,
         }
@@ -194,13 +204,16 @@ impl PortDetector {
     ///
     /// Reads directly from /proc/<pid>/net/tcp and /proc/<pid>/net/tcp6.
     /// This does NOT require root - we can read the proc files of processes we spawned.
-    fn scan_ports(&self) -> Result<HashMap<u64, ListeningPort>, PortMonError> {
+    fn scan_ports(&mut self) -> Result<HashMap<u64, ListeningPort>, PortMonError> {
+        // Ensure we have the correct PID for the namespace
+        let pid = self.get_namespace_pid();
+
         let mut ports = HashMap::new();
 
         // Scan IPv4 listening ports
-        let tcp4_path = format!("/proc/{}/net/tcp", self.sandbox_pid);
-        if std::path::Path::new(&tcp4_path).exists() {
-            match std::fs::read_to_string(&tcp4_path) {
+        let tcp4_path = format!("/proc/{}/net/tcp", pid);
+        if Path::new(&tcp4_path).exists() {
+            match fs::read_to_string(&tcp4_path) {
                 Ok(content) => {
                     let ipv4_ports = parse_proc_net_tcp(&content, false)?;
                     ports.extend(ipv4_ports);
@@ -213,9 +226,9 @@ impl PortDetector {
         }
 
         // Scan IPv6 listening ports (CRITICAL: many modern tools bind to :: by default)
-        let tcp6_path = format!("/proc/{}/net/tcp6", self.sandbox_pid);
-        if std::path::Path::new(&tcp6_path).exists() {
-            match std::fs::read_to_string(&tcp6_path) {
+        let tcp6_path = format!("/proc/{}/net/tcp6", pid);
+        if Path::new(&tcp6_path).exists() {
+            match fs::read_to_string(&tcp6_path) {
                 Ok(content) => {
                     let ipv6_ports = parse_proc_net_tcp(&content, true)?;
                     ports.extend(ipv6_ports);
@@ -229,15 +242,133 @@ impl PortDetector {
         Ok(ports)
     }
 
-    /// Get the sandbox PID being monitored.
+    /// Get a PID that's inside the sandbox's network namespace.
+    ///
+    /// bwrap itself may stay in the host namespace, so we need to find a child
+    /// process that's actually inside the sandbox's network namespace.
+    fn get_namespace_pid(&mut self) -> u32 {
+        // Return cached PID if we have one and it still exists
+        if let Some(pid) = self.namespace_pid {
+            if Path::new(&format!("/proc/{}", pid)).exists() {
+                return pid;
+            }
+            // PID no longer exists, need to find a new one
+            self.namespace_pid = None;
+        }
+
+        // Try to find a child process in a different network namespace
+        if let Some(child_pid) = find_child_in_different_netns(self.wrapper_pid) {
+            debug!(
+                "Found child PID {} in sandbox network namespace (wrapper PID: {})",
+                child_pid, self.wrapper_pid
+            );
+            self.namespace_pid = Some(child_pid);
+            return child_pid;
+        }
+
+        // Fallback to wrapper PID (might not work for network detection)
+        trace!(
+            "No child in different netns found, using wrapper PID {}",
+            self.wrapper_pid
+        );
+        self.wrapper_pid
+    }
+
+    /// Get the wrapper PID being monitored.
     pub fn sandbox_pid(&self) -> u32 {
-        self.sandbox_pid
+        self.wrapper_pid
     }
 
     /// Get the current known ports (for inspection).
     pub fn known_ports(&self) -> &HashMap<u64, ListeningPort> {
         &self.known_ports
     }
+}
+
+/// Find a child process of the given PID that's in a different network namespace.
+///
+/// This is needed because bwrap (the sandbox wrapper) may stay in the host network
+/// namespace while only putting its child processes into the sandbox namespace.
+///
+/// Returns the PID of the first child found in a different namespace, or None.
+fn find_child_in_different_netns(parent_pid: u32) -> Option<u32> {
+    // Get the parent's network namespace
+    let parent_netns = fs::read_link(format!("/proc/{}/ns/net", parent_pid)).ok()?;
+
+    // Find all child processes by scanning /proc
+    let proc_dir = fs::read_dir("/proc").ok()?;
+
+    for entry in proc_dir.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        // Skip non-numeric entries
+        let pid: u32 = match name_str.parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        // Skip the parent itself
+        if pid == parent_pid {
+            continue;
+        }
+
+        // Check if this process is a descendant of the parent
+        let ppid_path = format!("/proc/{}/stat", pid);
+        if let Ok(stat_content) = fs::read_to_string(&ppid_path)
+            && let Some(pos) = stat_content.rfind(')')
+        {
+            // Format: pid (comm) state ppid ...
+            // The comm field can contain spaces and parentheses, so we need to find
+            // the last ')' and parse from there
+            let after_comm = &stat_content[pos + 1..];
+            let fields: Vec<&str> = after_comm.split_whitespace().collect();
+            if fields.len() >= 2
+                && let Ok(ppid) = fields[1].parse::<u32>()
+                // Check if this is a direct child or descendant of parent
+                && (ppid == parent_pid || is_descendant_of(pid, parent_pid))
+                // Check if it's in a different network namespace
+                && let Ok(child_netns) = fs::read_link(format!("/proc/{}/ns/net", pid))
+                && child_netns != parent_netns
+            {
+                return Some(pid);
+            }
+        }
+    }
+
+    None
+}
+
+/// Check if a process is a descendant of a given ancestor.
+fn is_descendant_of(pid: u32, ancestor: u32) -> bool {
+    let mut current = pid;
+    let mut depth = 0;
+    const MAX_DEPTH: u32 = 20; // Prevent infinite loops
+
+    while depth < MAX_DEPTH {
+        let stat_path = format!("/proc/{}/stat", current);
+        if let Ok(content) = fs::read_to_string(&stat_path)
+            && let Some(pos) = content.rfind(')')
+        {
+            let after_comm = &content[pos + 1..];
+            let fields: Vec<&str> = after_comm.split_whitespace().collect();
+            if fields.len() >= 2
+                && let Ok(ppid) = fields[1].parse::<u32>()
+            {
+                if ppid == ancestor {
+                    return true;
+                }
+                if ppid == 0 || ppid == 1 {
+                    return false; // Reached init
+                }
+                current = ppid;
+                depth += 1;
+                continue;
+            }
+        }
+        return false;
+    }
+    false
 }
 
 /// Parse /proc/net/tcp or /proc/net/tcp6 content.

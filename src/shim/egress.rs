@@ -8,7 +8,7 @@
 //!
 //! This is typically invoked via a hidden subcommand:
 //!
-//! ```ignore
+//! ```text
 //! secure-llm internal-shim /tmp/proxy.sock
 //! ```
 //!
@@ -74,7 +74,7 @@ pub enum ShimError {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use secure_llm::shim::egress::run;
 /// use std::path::Path;
 ///

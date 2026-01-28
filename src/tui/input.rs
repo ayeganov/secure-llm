@@ -13,6 +13,7 @@
 //! | Tab | Cycle focus between panels |
 //! | Shift+Tab | Cycle focus backwards |
 //! | `p` / Enter | Bridge selected port |
+//! | `s` | Stop bridge for selected port |
 //! | `q` / Esc | Exit TUI |
 
 use crate::tui::{FocusPanel, TuiApp};
@@ -113,6 +114,11 @@ async fn handle_port_keys(app: &mut TuiApp, key: KeyEvent) -> InputResult {
         // Bridge port
         KeyCode::Char('p') | KeyCode::Enter => {
             app.bridge_selected_port().await;
+            InputResult::Handled
+        }
+        // Stop bridge
+        KeyCode::Char('s') => {
+            app.stop_selected_bridge().await;
             InputResult::Handled
         }
         _ => InputResult::NotHandled,

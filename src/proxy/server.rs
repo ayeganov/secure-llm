@@ -15,26 +15,6 @@
 //! In the rootless socket shim architecture, the proxy listens on a Unix socket
 //! that is bind-mounted into the sandbox. Inside the sandbox, an egress shim
 //! forwards TCP traffic from 127.0.0.1:8080 to this Unix socket.
-//!
-//! # Example
-//!
-//! ```ignore
-//! use secure_llm::proxy::{ProxyServer, ProxyConfig};
-//! use std::sync::Arc;
-//! use std::path::PathBuf;
-//!
-//! let config = ProxyConfig {
-//!     listen_path: PathBuf::from("/tmp/secure-llm/proxy.sock"),
-//!     /* ... */
-//! };
-//! let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-//!
-//! let server = ProxyServer::new(config, shutdown_rx);
-//! server.run().await?;
-//!
-//! // To shutdown:
-//! shutdown_tx.send(true)?;
-//! ```
 
 use super::connect::{handle_connect, handle_http};
 use super::error::ProxyError;

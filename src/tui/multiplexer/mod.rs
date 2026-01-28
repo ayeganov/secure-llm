@@ -11,7 +11,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use secure_llm::tui::multiplexer::{create_multiplexer, SidecarOptions};
 //!
 //! if let Some(mux) = create_multiplexer() {
@@ -23,6 +24,8 @@
 //!     let pane = mux.create_sidecar_pane(options)?;
 //!     // pane will be cleaned up on drop
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 pub mod tmux;

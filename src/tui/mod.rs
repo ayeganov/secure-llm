@@ -27,23 +27,6 @@
 //! │ [Tab] switch | [j/k] navigate | [q] quit│
 //! └─────────────────────────────────────────┘
 //! ```
-//!
-//! # Example
-//!
-//! ```ignore
-//! use secure_llm::tui::{TuiApp, TuiRunner};
-//! use secure_llm::control::create_channel_pair;
-//!
-//! // Create channels for proxy communication
-//! let (proxy_channels, tui_channels) = create_channel_pair();
-//!
-//! // Create TUI app
-//! let mut app = TuiApp::new(tui_channels, shutdown_rx);
-//!
-//! // Run the TUI
-//! let mut runner = TuiRunner::new()?;
-//! runner.run(&mut app).await?;
-//! ```
 
 pub mod app;
 pub mod input;

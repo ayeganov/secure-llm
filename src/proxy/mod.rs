@@ -30,23 +30,6 @@
 //!                                         │  (via veth)  │
 //!                                         └──────────────┘
 //! ```
-//!
-//! # Example
-//!
-//! ```ignore
-//! use secure_llm::proxy::{ProxyServer, ProxyConfig, PolicyEngine};
-//! use secure_llm::sandbox::ca::EphemeralCa;
-//! use std::sync::Arc;
-//!
-//! // Create dependencies
-//! let ca = Arc::new(EphemeralCa::generate()?);
-//! let policy = Arc::new(PolicyEngine::from_config(&config.network, &[]));
-//!
-//! // Create and run proxy
-//! let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-//! let server = ProxyServer::new(ProxyConfig { /* ... */ }, shutdown_rx);
-//! server.run().await?;
-//! ```
 
 pub mod connect;
 pub mod error;

@@ -42,9 +42,15 @@ impl Widget for PortsWidget<'_> {
                 let is_selected = i == self.selected && self.focused;
 
                 let status_span = if port.forwarded {
-                    Span::styled("[BRIDGED]", Style::default().fg(Color::Green))
+                    Span::styled(
+                        "[BRIDGED - s:stop]",
+                        Style::default().fg(Color::Green),
+                    )
                 } else {
-                    Span::styled("[--]", Style::default().fg(Color::DarkGray))
+                    Span::styled(
+                        "[p:bridge]",
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    )
                 };
 
                 let port_style = if is_selected {
@@ -72,8 +78,12 @@ impl Widget for PortsWidget<'_> {
             })
             .collect();
 
-        // Create block with title
-        let title = format!(" Ports ({}) ", self.ports.len());
+        // Create block with title (show help when focused)
+        let title = if self.focused && !self.ports.is_empty() {
+            format!(" Ports ({}) - p:bridge s:stop ", self.ports.len())
+        } else {
+            format!(" Ports ({}) ", self.ports.len())
+        };
         let border_style = if self.focused {
             Style::default().fg(Color::Yellow)
         } else {

@@ -24,8 +24,10 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use secure_llm::sandbox::ca::EphemeralCa;
+//! use std::path::Path;
 //!
 //! let ca = EphemeralCa::generate()?;
 //!
@@ -34,6 +36,8 @@
 //!
 //! // Generate a certificate for a domain (used by MITM proxy)
 //! let domain_cert = ca.generate_cert("api.example.com")?;
+//! # Ok(())
+//! # }
 //! ```
 
 use super::error::CaError;

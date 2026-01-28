@@ -6,6 +6,9 @@ use std::path::PathBuf;
 /// Canonical path where the CA bundle is mounted inside the sandbox.
 pub const SANDBOX_CA_BUNDLE_PATH: &str = "/etc/ssl/certs/ca-certificates.crt";
 
+/// Default maximum number of port bridge slots.
+pub const DEFAULT_MAX_PORT_BRIDGES: u8 = 8;
+
 /// Configuration for a Bubblewrap sandbox.
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
@@ -27,6 +30,10 @@ pub struct SandboxConfig {
     pub resolv_conf_path: PathBuf,
     /// Path to proxy Unix socket on host.
     pub proxy_socket_path: Option<PathBuf>,
+    /// Path to portbridge socket directory on host (for port bridging).
+    pub portbridge_dir: Option<PathBuf>,
+    /// Maximum number of port bridge slots.
+    pub max_port_bridges: u8,
     /// Additional bwrap flags.
     pub extra_flags: Vec<String>,
 }

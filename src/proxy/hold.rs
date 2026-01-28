@@ -16,20 +16,24 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use secure_llm::proxy::hold::{ConnectionHoldManager, ConnectionDecision};
 //! use std::time::Duration;
 //!
 //! let manager = ConnectionHoldManager::new(Duration::from_secs(30));
 //!
 //! // Park a connection
-//! let (id, decision_rx) = manager.park("api.unknown.com".into());
+//! let (id, decision_rx) = manager.park("api.unknown.com".into(), 443);
 //!
 //! // Later, record a decision (e.g., from TUI)
 //! manager.decide(id, ConnectionDecision::Allow)?;
 //!
 //! // The parked connection receives the decision via the channel
 //! let decision = decision_rx.await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::collections::HashMap;

@@ -19,7 +19,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use secure_llm::sandbox::cleanup::cleanup_stale_resources;
 //!
 //! // In main(), before creating any sandbox resources
