@@ -6,15 +6,18 @@
 //! - Log messages
 //! - UI focus and selection state
 
+use crate::config::ConfigLoader;
 use crate::control::protocol::{
     Decision, DetectedPort, EventCategory, LogLevel, PendingPermission, ProxyToTui, TuiToProxy,
 };
 use crate::control::{ControlSocketClient, TuiChannels};
 use chrono::Utc;
 use std::collections::VecDeque;
+use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::debug;
 
+use super::allowlist_state::AllowlistModalState;
 use super::state::{FocusPanel, LogEntry, MAX_DETECTED_PORTS, MAX_LOG_ENTRIES};
 use super::transport::TuiTransport;
 
@@ -42,6 +45,10 @@ pub struct TuiApp {
     should_quit: bool,
     /// Status message to display.
     status_message: Option<String>,
+    /// Allowlist modal state.
+    allowlist_state: AllowlistModalState,
+    /// Config loader for managing allowlist.
+    config_loader: Option<Arc<ConfigLoader>>,
 }
 
 impl TuiApp {
@@ -59,7 +66,57 @@ impl TuiApp {
             log_selection: 0,
             should_quit: false,
             status_message: None,
+            allowlist_state: AllowlistModalState::new(),
+            config_loader: None,
         }
+    }
+
+    /// Set the config loader for allowlist management.
+    pub fn with_config_loader(mut self, loader: Arc<ConfigLoader>) -> Self {
+        self.config_loader = Some(loader);
+        self
+    }
+
+    /// Load domains from the allowlist file.
+    pub fn load_allowlist(&mut self) {
+        if let Some(ref loader) = self.config_loader {
+            self.allowlist_state.load_domains(loader);
+        }
+    }
+
+    /// Show the allowlist modal.
+    pub fn show_allowlist_modal(&mut self) {
+        // Reload domains before showing
+        self.load_allowlist();
+        self.allowlist_state.show();
+    }
+
+    /// Hide the allowlist modal.
+    pub fn hide_allowlist_modal(&mut self) {
+        self.allowlist_state.hide();
+    }
+
+    /// Check if the allowlist modal is visible.
+    #[must_use]
+    pub fn is_allowlist_modal_visible(&self) -> bool {
+        self.allowlist_state.is_visible()
+    }
+
+    /// Get a reference to the allowlist state.
+    #[must_use]
+    pub fn allowlist_state(&self) -> &AllowlistModalState {
+        &self.allowlist_state
+    }
+
+    /// Get a mutable reference to the allowlist state.
+    pub fn allowlist_state_mut(&mut self) -> &mut AllowlistModalState {
+        &mut self.allowlist_state
+    }
+
+    /// Get the config loader.
+    #[must_use]
+    pub fn config_loader(&self) -> Option<&Arc<ConfigLoader>> {
+        self.config_loader.as_ref()
     }
 
     /// Create a new TUI application with channel-based transport.

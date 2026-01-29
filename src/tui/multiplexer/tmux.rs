@@ -158,6 +158,23 @@ impl SidecarPaneHandle for TmuxSidecarPane {
         Ok(())
     }
 
+    fn focus(&self) -> MultiplexerResult<()> {
+        let output = Command::new("tmux")
+            .args(["select-pane", "-t", &self.pane_id])
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(MultiplexerError::CommandFailed(format!(
+                "Failed to focus pane: {}",
+                stderr
+            )));
+        }
+
+        debug!("Focused tmux pane {}", self.pane_id);
+        Ok(())
+    }
+
     fn kill(&self) -> MultiplexerResult<()> {
         let output = Command::new("tmux")
             .args(["kill-pane", "-t", &self.pane_id])

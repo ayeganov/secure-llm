@@ -35,9 +35,18 @@ pub enum AllowlistAction {
 /// Review the startup allowlist and let the user clear/edit it.
 ///
 /// Returns `AllowlistAction::Proceed` to continue or `AllowlistAction::Quit` to exit.
+///
+/// When TUI is available (running in a terminal multiplexer), this review is skipped
+/// because the TUI modal will handle allowlist management at startup.
 fn review_startup_allowlist(config_loader: &ConfigLoader, headless: bool) -> Result<AllowlistAction> {
     // Skip review in headless mode
     if headless {
+        return Ok(AllowlistAction::Proceed);
+    }
+
+    // Skip pre-TUI review when TUI is available (multiplexer detected)
+    // The TUI will show the allowlist modal at startup instead
+    if create_multiplexer().is_some() {
         return Ok(AllowlistAction::Proceed);
     }
 

@@ -223,6 +223,27 @@ impl SidecarPaneHandle for ZellijSidecarPane {
         Ok(())
     }
 
+    fn focus(&self) -> MultiplexerResult<()> {
+        // Move focus to the sidecar pane (which is below the main pane)
+        let output = Command::new("zellij")
+            .args(["action", "move-focus", "down"])
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(MultiplexerError::CommandFailed(format!(
+                "Failed to focus pane: {}",
+                stderr
+            )));
+        }
+
+        debug!(
+            "Focused zellij sidecar pane (tracking id: {})",
+            self.tracking_id
+        );
+        Ok(())
+    }
+
     fn kill(&self) -> MultiplexerResult<()> {
         // Move focus to sidecar pane and close it
         let move_output = Command::new("zellij")

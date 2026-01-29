@@ -14,8 +14,23 @@
 //! | Shift+Tab | Cycle focus backwards |
 //! | `p` / Enter | Bridge selected port |
 //! | `s` | Stop bridge for selected port |
+//! | `m` | Open allowlist management modal |
 //! | `q` / Esc | Exit TUI |
+//!
+//! # Allowlist Modal Keybindings
+//!
+//! | Key | Action |
+//! |-----|--------|
+//! | `Enter` | Accept allowlist and close |
+//! | `Esc` | Close modal |
+//! | `Space` | Toggle selection at cursor |
+//! | `a` | Select all |
+//! | `n` | Select none (deselect all) |
+//! | `r` | Remove selected domains |
+//! | `j` / Down | Cursor down |
+//! | `k` / Up | Cursor up |
 
+use crate::control::protocol::{EventCategory, LogLevel};
 use crate::tui::{FocusPanel, TuiApp};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
@@ -43,6 +58,11 @@ pub async fn handle_event(app: &mut TuiApp, event: Event) -> InputResult {
 
 /// Handle a key event.
 async fn handle_key(app: &mut TuiApp, key: KeyEvent) -> InputResult {
+    // Route through modal first if visible
+    if app.is_allowlist_modal_visible() {
+        return handle_allowlist_modal_keys(app, key);
+    }
+
     // Handle quit keys globally
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => {
@@ -50,6 +70,12 @@ async fn handle_key(app: &mut TuiApp, key: KeyEvent) -> InputResult {
             return InputResult::Quit;
         }
         _ => {}
+    }
+
+    // Handle global keybinding: open allowlist modal
+    if let KeyCode::Char('m') = key.code {
+        app.show_allowlist_modal();
+        return InputResult::Handled;
     }
 
     // Handle navigation keys globally
@@ -78,6 +104,71 @@ async fn handle_key(app: &mut TuiApp, key: KeyEvent) -> InputResult {
         FocusPanel::Permissions => handle_permission_keys(app, key).await,
         FocusPanel::Ports => handle_port_keys(app, key).await,
         FocusPanel::Logs => handle_log_keys(app, key).await,
+    }
+}
+
+/// Handle keys when the allowlist modal is visible.
+fn handle_allowlist_modal_keys(app: &mut TuiApp, key: KeyEvent) -> InputResult {
+    match key.code {
+        // Close modal (cancel)
+        KeyCode::Esc => {
+            app.hide_allowlist_modal();
+            InputResult::Handled
+        }
+        // Accept and close modal
+        KeyCode::Enter => {
+            app.hide_allowlist_modal();
+            app.add_log(
+                LogLevel::Info,
+                EventCategory::Policy,
+                "Allowlist accepted".to_string(),
+            );
+            InputResult::Handled
+        }
+        // Toggle selection at cursor
+        KeyCode::Char(' ') => {
+            app.allowlist_state_mut().toggle_selected();
+            InputResult::Handled
+        }
+        // Select all
+        KeyCode::Char('a') => {
+            app.allowlist_state_mut().select_all();
+            InputResult::Handled
+        }
+        // Select none (deselect all)
+        KeyCode::Char('n') => {
+            app.allowlist_state_mut().select_none();
+            InputResult::Handled
+        }
+        // Remove selected domains
+        KeyCode::Char('r') => {
+            if let Some(loader) = app.config_loader().cloned() {
+                let removed = app.allowlist_state_mut().remove_selected(&loader);
+                if removed > 0 {
+                    app.add_log(
+                        LogLevel::Info,
+                        EventCategory::Policy,
+                        format!("Removed {} domain(s) from allowlist", removed),
+                    );
+                }
+                // Close modal if list is now empty
+                if app.allowlist_state().domains().is_empty() {
+                    app.hide_allowlist_modal();
+                }
+            }
+            InputResult::Handled
+        }
+        // Navigate down
+        KeyCode::Char('j') | KeyCode::Down => {
+            app.allowlist_state_mut().cursor_down();
+            InputResult::Handled
+        }
+        // Navigate up
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.allowlist_state_mut().cursor_up();
+            InputResult::Handled
+        }
+        _ => InputResult::NotHandled,
     }
 }
 

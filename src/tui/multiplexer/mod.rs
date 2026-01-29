@@ -111,6 +111,9 @@ pub trait SidecarPaneHandle: Send + Sync {
     /// Send keys/text to the pane.
     fn send_keys(&self, keys: &str) -> MultiplexerResult<()>;
 
+    /// Focus this pane (bring it to foreground).
+    fn focus(&self) -> MultiplexerResult<()>;
+
     /// Kill/close the pane.
     fn kill(&self) -> MultiplexerResult<()>;
 
@@ -138,6 +141,42 @@ pub trait TerminalMultiplexer: Send + Sync {
 
 /// Default height for TUI sidecar panes (in lines).
 pub const DEFAULT_SIDECAR_HEIGHT: u32 = 15;
+
+/// Focus the current pane (TUI pane focusing itself).
+///
+/// This is used by the TUI subprocess to request focus when showing the allowlist modal.
+/// For tmux, uses the TMUX_PANE env var to select the current pane.
+/// For zellij, this is a no-op since zellij doesn't support focusing a pane from within.
+pub fn focus_current_pane() {
+    use std::process::Command;
+
+    // Try tmux first (most reliable)
+    if let Ok(pane_id) = std::env::var("TMUX_PANE") {
+        let result = Command::new("tmux")
+            .args(["select-pane", "-t", &pane_id])
+            .output();
+
+        match result {
+            Ok(output) if output.status.success() => {
+                debug!("Focused current tmux pane: {}", pane_id);
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                debug!("Failed to focus tmux pane: {}", stderr);
+            }
+            Err(e) => {
+                debug!("Failed to run tmux select-pane: {}", e);
+            }
+        }
+        return;
+    }
+
+    // For zellij, we can't focus from within the pane itself
+    // The focus command is relative (move-focus down/up) and meant to be called from another pane
+    if std::env::var("ZELLIJ").is_ok() {
+        debug!("Zellij detected - cannot self-focus, focus may need manual intervention");
+    }
+}
 
 /// Check if running inside Zellij.
 #[must_use]

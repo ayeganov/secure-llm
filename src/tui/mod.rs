@@ -6,6 +6,7 @@
 //! - Live log stream
 //! - Status bar with sandbox info
 //! - Keyboard input handling for permission decisions
+//! - Allowlist management modal
 //!
 //! # Architecture
 //!
@@ -28,6 +29,7 @@
 //! └─────────────────────────────────────────┘
 //! ```
 
+pub mod allowlist_state;
 pub mod app;
 pub mod input;
 pub mod layout;
@@ -38,16 +40,18 @@ pub mod transport;
 pub mod widgets;
 
 // Re-export main types for convenient access
+pub use allowlist_state::AllowlistModalState;
 pub use app::TuiApp;
 pub use input::{handle_event, InputResult};
 pub use layout::TuiLayout;
 pub use runner::{run_with_recovery, TuiRunner};
 pub use state::{FocusPanel, LogEntry, MAX_LOG_ENTRIES};
-pub use widgets::{LogsWidget, PendingWidget, PortsWidget, StatusWidget};
+pub use widgets::{centered_rect, AllowlistWidget, LogsWidget, PendingWidget, PortsWidget, StatusWidget};
 
 // Re-export multiplexer types for convenient access
 pub use multiplexer::{
-    create_multiplexer, detect_multiplexer, is_in_multiplexer, is_in_tmux, is_in_zellij,
-    MultiplexerError, MultiplexerKind, MultiplexerResult, SidecarOptions, SidecarPaneHandle,
-    TerminalMultiplexer, TmuxMultiplexer, ZellijMultiplexer, DEFAULT_SIDECAR_HEIGHT,
+    create_multiplexer, detect_multiplexer, focus_current_pane, is_in_multiplexer, is_in_tmux,
+    is_in_zellij, MultiplexerError, MultiplexerKind, MultiplexerResult, SidecarOptions,
+    SidecarPaneHandle, TerminalMultiplexer, TmuxMultiplexer, ZellijMultiplexer,
+    DEFAULT_SIDECAR_HEIGHT,
 };

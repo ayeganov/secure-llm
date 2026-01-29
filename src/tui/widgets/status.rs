@@ -80,6 +80,8 @@ impl Widget for StatusWidget {
             Span::styled("Navigate ", action_style),
             Span::styled(" Tab ", key_style),
             Span::styled("Switch Panel ", action_style),
+            Span::styled(" m ", key_style),
+            Span::styled("Allowlist ", action_style),
             Span::styled(" q ", key_style),
             Span::styled("Quit ", action_style),
         ]);

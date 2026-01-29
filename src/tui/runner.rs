@@ -8,7 +8,7 @@
 use super::app::TuiApp;
 use super::input::{handle_event, InputResult};
 use super::layout::TuiLayout;
-use super::widgets::{LogsWidget, PendingWidget, PortsWidget, StatusWidget};
+use super::widgets::{centered_rect, AllowlistWidget, LogsWidget, PendingWidget, PortsWidget, StatusWidget};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture},
     execute,
@@ -147,6 +147,13 @@ fn render_ui(frame: &mut Frame, app: &TuiApp) {
     let status_widget = StatusWidget::new(app.focus(), app.pending_permissions().len())
         .with_message(app.status_message().map(String::from));
     frame.render_widget(status_widget, layout.status);
+
+    // Render modal overlay if visible
+    if app.is_allowlist_modal_visible() {
+        let modal_area = centered_rect(60, 70, frame.area());
+        let allowlist_widget = AllowlistWidget::new(app.allowlist_state());
+        frame.render_widget(allowlist_widget, modal_area);
+    }
 }
 
 /// Run the TUI with panic recovery.

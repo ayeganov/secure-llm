@@ -4,13 +4,15 @@
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::error;
 
 use crate::cli::Commands;
+use crate::config::ConfigLoader;
 use crate::control::ControlSocketClient;
 use crate::shim;
-use crate::tui::{TuiApp, TuiRunner};
+use crate::tui::{focus_current_pane, TuiApp, TuiRunner};
 
 /// Handle subcommands (internal shim, internal TUI, etc.).
 pub fn handle_command(command: Commands) -> Result<()> {
@@ -62,7 +64,20 @@ fn run_tui_subprocess(socket_path: &PathBuf) -> Result<()> {
             .context("Failed to connect to control socket")?;
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let mut app = TuiApp::new_with_socket(client, shutdown_rx);
+
+        // Create config loader for allowlist management
+        let config_loader = Arc::new(ConfigLoader::new());
+
+        let mut app = TuiApp::new_with_socket(client, shutdown_rx)
+            .with_config_loader(config_loader);
+
+        // Load allowlist and show modal if non-empty
+        app.load_allowlist();
+        if !app.allowlist_state().domains().is_empty() {
+            app.show_allowlist_modal();
+            // Focus the TUI pane so the user can interact with the modal
+            focus_current_pane();
+        }
 
         match TuiRunner::new() {
             Ok(mut runner) => {
