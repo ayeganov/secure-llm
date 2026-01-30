@@ -1,41 +1,46 @@
 //! Configuration system for secure-llm.
 //!
-//! This module provides TOML configuration loading with hierarchy merging
-//! and embedded default tool profiles.
+//! This module provides TOML configuration loading with hierarchy merging.
+//! Tool configurations are defined in `[tools.<name>]` sections of the config file.
 //!
 //! # Configuration Hierarchy
 //!
 //! Configuration is loaded from multiple sources and merged in order:
 //!
-//! 1. Embedded defaults (compiled into binary)
-//! 2. System config: `/etc/secure-llm/config.toml`
-//! 3. User config: `~/.config/secure-llm/config.toml`
-//! 4. Additional config file (via `--config` flag)
-//! 5. CLI flags (highest priority)
+//! 1. System config: `/etc/secure-llm/config.toml`
+//! 2. User config: `~/.config/secure-llm/config.toml`
+//! 3. Additional config file (via `--config` flag)
+//! 4. CLI flags (highest priority)
+//!
+//! At least one configuration file must exist. If no config is found, secure-llm
+//! will fail with a helpful error message.
 //!
 //! # Merge Behavior
 //!
 //! - **Lists** (allowlist, blocklist, etc.) are **merged** (appended)
 //! - **Scalars** (timeout, log_level, etc.) are **overridden**
 //! - **Maps** (host_rewrite, env) are **merged** (later values override)
+//! - **Tools** are merged by key, with tool-specific merge rules
 //!
-//! # Tool Profiles
+//! # Tool Configuration
 //!
-//! Built-in profiles for common tools (Claude Code, Cursor, Windsurf) are
-//! embedded at compile time. Custom profiles can be placed in:
+//! Tools are configured in `[tools.<name>]` sections:
 //!
-//! - System: `/etc/secure-llm/profiles/<name>.toml`
-//! - User: `~/.config/secure-llm/profiles/<name>.toml`
+//! ```toml
+//! [tools.claude]
+//! binary = "claude"
+//! display_name = "Claude Code"
+//! allowlist = ["*.anthropic.com"]
+//! bind_rw = ["$HOME"]
+//! ```
 
 mod error;
 mod loader;
-mod profiles;
 mod schema;
 
 pub use error::ConfigError;
 pub use loader::ConfigLoader;
-pub use profiles::{ProfileNetworkConfig, ProfileProxyConfig, ToolInfo, ToolProfile};
 pub use schema::{
     AllowedDomains, Config, FilesystemConfig, GatewayConfig, GeneralConfig, NetworkConfig,
-    SandboxConfig, UserAllowlist,
+    SandboxConfig, ToolConfig, UserAllowlist,
 };

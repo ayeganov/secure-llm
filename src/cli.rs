@@ -65,13 +65,6 @@ pub struct Cli {
     #[arg(short = 'c', long = "config", value_name = "PATH")]
     pub config: Option<PathBuf>,
 
-    /// Use specific tool profile.
-    ///
-    /// Override automatic profile detection based on tool name.
-    /// Can be a built-in profile name or path to a custom profile.
-    #[arg(long = "profile", value_name = "NAME")]
-    pub profile: Option<String>,
-
     /// Run without TUI (fail closed, log only).
     ///
     /// In headless mode, all permission prompts will automatically fail

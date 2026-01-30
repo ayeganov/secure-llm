@@ -24,9 +24,28 @@ pub enum ConfigError {
         source: toml::de::Error,
     },
 
-    /// Requested an unknown tool profile.
-    #[error("Unknown tool profile: {0}")]
-    UnknownProfile(String),
+    /// No configuration file was found.
+    ///
+    /// secure-llm requires a configuration file to operate. This error is
+    /// returned when neither system nor user config files exist.
+    #[error("No configuration file found. secure-llm requires a config file.\n\nLooked in:\n  - {system_path}\n  - {user_path}\n\nInstall default config: sudo cp /usr/share/secure-llm/config.toml /etc/secure-llm/")]
+    NoConfigFound {
+        /// Path where system config was expected.
+        system_path: PathBuf,
+        /// Path where user config was expected.
+        user_path: PathBuf,
+    },
+
+    /// Requested an unknown tool.
+    ///
+    /// The tool name is not defined in the configuration.
+    #[error("Unknown tool '{tool}'. This tool is not defined in your configuration.\n\nAvailable tools: {available}\n\nAdd a [tools.{tool}] section to your config file.")]
+    UnknownTool {
+        /// The tool name that was requested.
+        tool: String,
+        /// Comma-separated list of available tool names.
+        available: String,
+    },
 
     /// A configuration value is invalid.
     #[error("Invalid config value for {field}: {message}")]

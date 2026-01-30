@@ -1,0 +1,85 @@
+# Default configuration for secure-llm
+# Install to: /etc/secure-llm/config.toml
+
+[general]
+prompt_timeout = 30
+log_level = "info"
+
+[gateway]
+url = "https://llm-gateway.corp"
+timeout_ms = 150
+
+[sandbox.env]
+HTTP_PROXY = "${SANDBOX_PROXY}"
+HTTPS_PROXY = "${SANDBOX_PROXY}"
+http_proxy = "${SANDBOX_PROXY}"
+https_proxy = "${SANDBOX_PROXY}"
+SSL_CERT_FILE = "${SANDBOX_CA_CERT}"
+NODE_EXTRA_CA_CERTS = "${SANDBOX_CA_CERT}"
+REQUESTS_CA_BUNDLE = "${SANDBOX_CA_CERT}"
+
+[network]
+allowlist = [
+    # Package registries
+    "pypi.org", "*.pypi.org", "files.pythonhosted.org",
+    "registry.npmjs.org", "*.npmjs.org",
+    "crates.io", "*.crates.io", "static.rust-lang.org",
+    # Git hosting
+    "github.com", "api.github.com",
+    "gitlab.com", "*.gitlab.com",
+    "bitbucket.org", "*.bitbucket.org",
+    # Linux packages
+    "apt.llvm.org", "*.ubuntu.com", "*.debian.org",
+]
+
+graylist = [
+    "raw.githubusercontent.com", "gist.githubusercontent.com",
+    "objects.githubusercontent.com", "raw.gitlab.com",
+    "pastebin.com", "paste.debian.net",
+]
+
+blocklist = []
+
+[network.host_rewrite]
+"api.anthropic.com" = "llm-gateway.corp/v1/anthropic"
+"api.openai.com" = "llm-gateway.corp/v1/openai"
+"generativelanguage.googleapis.com" = "llm-gateway.corp/v1/google"
+
+[filesystem]
+denylist = []
+bind_ro = []
+bind_rw = []
+
+# ===== Tool Configurations =====
+
+[tools.claude]
+binary = "claude"
+display_name = "Claude Code"
+allowlist = ["*.anthropic.com", "statsig.anthropic.com"]
+bind_rw = ["$HOME"]
+# Note: Add tool-specific env vars in user config, not shipped default
+
+[tools.cursor]
+binary = "cursor"
+display_name = "Cursor IDE"
+allowlist = ["*.cursor.sh", "cursor.sh", "download.cursor.sh"]
+
+[tools.cursor.host_rewrite]
+"api.cursor.sh" = "llm-gateway.corp/v1/cursor"
+"api2.cursor.sh" = "llm-gateway.corp/v1/cursor"
+
+[tools.gemini]
+binary = "gemini"
+display_name = "Gemini CLI"
+allowlist = [
+    "generativelanguage.googleapis.com", "*.googleapis.com",
+    "accounts.google.com", "oauth2.googleapis.com", "*.google.com",
+]
+
+[tools.windsurf]
+binary = "windsurf"
+display_name = "Windsurf IDE"
+allowlist = ["*.codeium.com", "codeium.com"]
+
+[tools.windsurf.host_rewrite]
+"api.codeium.com" = "llm-gateway.corp/v1/codeium"

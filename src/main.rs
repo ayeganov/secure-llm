@@ -62,14 +62,21 @@ fn main() -> Result<()> {
 
     debug!("Loaded configuration: {:?}", config);
 
-    // Load tool profile
-    let profile = config_loader
-        .load_profile(tool, cli.profile.as_deref())
-        .context("Failed to load tool profile")?;
+    // Look up tool configuration
+    let tool_config = config.tools.get(tool).ok_or_else(|| {
+        let available = config.available_tools().join(", ");
+        anyhow::anyhow!(
+            "Unknown tool '{}'. This tool is not defined in your configuration.\n\n\
+             Available tools: {}\n\n\
+             Add a [tools.{}] section to your config file.",
+            tool, available, tool
+        )
+    })?;
 
     info!(
-        "Using profile '{}' for tool '{}'",
-        profile.tool.display_name, tool
+        "Using tool '{}' ({})",
+        tool,
+        tool_config.display_name_or_binary()
     );
 
     // Record session start time
@@ -83,7 +90,7 @@ fn main() -> Result<()> {
     });
 
     // Run the sandbox - this is the main orchestration
-    let result = secure_llm::orchestrator::run_sandbox(&cli, &config, &profile, config_loader);
+    let result = secure_llm::orchestrator::run_sandbox(&cli, &config, tool, tool_config, config_loader);
 
     // Calculate session duration
     let duration_sec = session_start.elapsed().as_secs();

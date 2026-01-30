@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, watch, Mutex};
 use tracing::{debug, error, info, warn};
 
 use crate::cli::Cli;
-use crate::config::{Config, ConfigLoader, ToolProfile};
+use crate::config::{Config, ConfigLoader, ToolConfig};
 use crate::control::{ControlPlane, ControlSocketServer, ProxyToTui};
 use crate::portmon::{PortBridgeManager, PortDetector};
 use crate::proxy::{hold::ConnectionHoldManager, PolicyEngine, ProxyConfig, ProxyServer};
@@ -138,8 +138,23 @@ fn edit_allowlist(config_loader: &ConfigLoader, domains: &[String]) -> Result<()
     Ok(())
 }
 
+/// Expand `$HOME` and `${HOME}` in a path string.
+fn expand_path_vars(path: &str) -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    let expanded = path
+        .replace("${HOME}", &home)
+        .replace("$HOME", &home);
+    PathBuf::from(expanded)
+}
+
 /// Run the sandbox orchestration.
-pub fn run_sandbox(cli: &Cli, config: &Config, profile: &ToolProfile, config_loader: ConfigLoader) -> Result<()> {
+pub fn run_sandbox(
+    cli: &Cli,
+    config: &Config,
+    _tool_name: &str,
+    tool_config: &ToolConfig,
+    config_loader: ConfigLoader,
+) -> Result<()> {
     // Review startup allowlist (user can clear/edit before proceeding)
     match review_startup_allowlist(&config_loader, cli.headless)? {
         AllowlistAction::Proceed => {}
@@ -192,8 +207,8 @@ pub fn run_sandbox(cli: &Cli, config: &Config, profile: &ToolProfile, config_loa
     let resolv_conf_path =
         create_resolv_conf(session_dir.path()).context("Failed to create synthetic resolv.conf")?;
 
-    // Create policy engine from merged config (base config + profile-specific rules)
-    let merged_network = merge_profile_network_config(&config.network, profile);
+    // Create policy engine from merged config (base config + tool-specific rules)
+    let merged_network = merge_tool_network_config(&config.network, tool_config);
     let cli_allow: Vec<String> = cli.allow_domains.clone();
     let policy = Arc::new(PolicyEngine::from_config(&merged_network, &cli_allow));
 
@@ -361,7 +376,7 @@ pub fn run_sandbox(cli: &Cli, config: &Config, profile: &ToolProfile, config_loa
     std::thread::sleep(Duration::from_millis(100));
 
     let tool_binary =
-        resolve_tool_binary(&profile.tool.binary).context("Failed to resolve tool binary")?;
+        resolve_tool_binary(&tool_config.binary).context("Failed to resolve tool binary")?;
 
     info!("Tool binary: {:?}", tool_binary);
 
@@ -373,10 +388,10 @@ pub fn run_sandbox(cli: &Cli, config: &Config, profile: &ToolProfile, config_loa
         work_dir: work_dir.clone(),
         proxy_addr: "http://127.0.0.1:8080".to_string(),
     };
-    // Merge base sandbox env (from config) with profile-specific env
-    // Profile env takes precedence over base config
+    // Merge base sandbox env (from config) with tool-specific env
+    // Tool env takes precedence over base config
     let mut merged_env = config.sandbox.env.clone();
-    merged_env.extend(profile.environment.clone());
+    merged_env.extend(tool_config.env.clone());
     let env = expand_env_vars(&merged_env, &env_context);
 
     let mut bind_ro: Vec<BindMount> = config
@@ -391,6 +406,16 @@ pub fn run_sandbox(cli: &Cli, config: &Config, profile: &ToolProfile, config_loa
         .iter()
         .map(|p| BindMount::same(p.clone()))
         .collect();
+
+    // Add tool-specific bind mounts (with $HOME expansion)
+    for path_str in &tool_config.bind_ro {
+        let path = expand_path_vars(path_str);
+        bind_ro.push(BindMount::same(path));
+    }
+    for path_str in &tool_config.bind_rw {
+        let path = expand_path_vars(path_str);
+        bind_rw.push(BindMount::same(path));
+    }
 
     for dir in collect_tool_mount_dirs(&tool_binary) {
         bind_ro.push(BindMount::same(dir));
@@ -565,12 +590,12 @@ fn collect_tool_mount_dirs(tool_binary: &Path) -> std::vec::Vec<PathBuf> {
     collected_mount_dirs
 }
 
-fn merge_profile_network_config(
+fn merge_tool_network_config(
     base: &crate::config::NetworkConfig,
-    profile: &ToolProfile,
+    tool_config: &ToolConfig,
 ) -> crate::config::NetworkConfig {
     let mut merged = base.clone();
-    merged.allowlist.extend(profile.network.allowlist.clone());
-    merged.host_rewrite.extend(profile.proxy.host_rewrite.clone());
+    merged.allowlist.extend(tool_config.allowlist.clone());
+    merged.host_rewrite.extend(tool_config.host_rewrite.clone());
     merged
 }

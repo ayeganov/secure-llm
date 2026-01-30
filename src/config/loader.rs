@@ -2,22 +2,23 @@
 //!
 //! Configuration is loaded from multiple sources and merged in order:
 //!
-//! 1. Embedded defaults (compiled into binary)
-//! 2. System config: `/etc/secure-llm/config.toml`
-//! 3. User config: `~/.config/secure-llm/config.toml`
-//! 4. Additional config file (via `--config` flag)
-//! 5. CLI flags (highest priority)
+//! 1. System config: `/etc/secure-llm/config.toml`
+//! 2. User config: `~/.config/secure-llm/config.toml`
+//! 3. Additional config file (via `--config` flag)
+//! 4. CLI flags (highest priority)
 //!
 //! Lists (allowlist, blocklist) are **merged** (appended).
 //! Scalars (timeout, log_level) are **overridden**.
+//!
+//! Note: A configuration file is required. If no config is found, the loader
+//! will return a `NoConfigFound` error with helpful instructions.
 
 use std::fs;
 use std::path::PathBuf;
 
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::error::ConfigError;
-use super::profiles::ToolProfile;
 use super::schema::{Config, NetworkConfig, UserAllowlist};
 use crate::cli::Cli;
 
@@ -71,23 +72,22 @@ impl ConfigLoader {
     /// Load and merge configuration from all sources.
     ///
     /// The merge order is:
-    /// 1. Embedded defaults
-    /// 2. System config (`/etc/secure-llm/config.toml`)
-    /// 3. User config (`~/.config/secure-llm/config.toml`)
-    /// 4. Additional config file (via `--config` flag)
-    /// 5. CLI flags (allow-domain, etc.)
+    /// 1. System config (`/etc/secure-llm/config.toml`)
+    /// 2. User config (`~/.config/secure-llm/config.toml`)
+    /// 3. Additional config file (via `--config` flag)
+    /// 4. CLI flags (allow-domain, etc.)
     ///
-    /// Missing config files are not errors - they are simply skipped.
+    /// At least one config file (system, user, or CLI-specified) must exist.
     /// Invalid TOML is an error (fail fast with clear message).
     pub fn load(&self, cli: &Cli) -> Result<Config, ConfigError> {
-        // Start with embedded defaults
         let mut config = Config::default();
-        debug!("Loaded embedded default configuration");
+        let mut found_config = false;
 
         // Load and merge system config
         if let Some(system_config) = self.load_file(&self.system_path)? {
             config.merge(system_config);
             debug!("Loaded system config from {:?}", self.system_path);
+            found_config = true;
         } else {
             debug!("No system config found at {:?}", self.system_path);
         }
@@ -96,6 +96,7 @@ impl ConfigLoader {
         if let Some(user_config) = self.load_file(&self.user_path)? {
             config.merge(user_config);
             debug!("Loaded user config from {:?}", self.user_path);
+            found_config = true;
         } else {
             debug!("No user config found at {:?}", self.user_path);
         }
@@ -119,6 +120,7 @@ impl ConfigLoader {
                         host_rewrite: Default::default(),
                     },
                     filesystem: Default::default(),
+                    tools: Default::default(),
                 };
                 config.merge(allowlist_config);
                 debug!("Loaded user allowlist/blocklist from {:?}", self.allowlist_path);
@@ -131,6 +133,7 @@ impl ConfigLoader {
                 Some(cli_config) => {
                     config.merge(cli_config);
                     debug!("Loaded additional config from {:?}", cli_config_path);
+                    found_config = true;
                 }
                 None => {
                     // Unlike system/user config, a missing CLI-specified config is an error
@@ -143,6 +146,14 @@ impl ConfigLoader {
                     });
                 }
             }
+        }
+
+        // Require at least one config file
+        if !found_config {
+            return Err(ConfigError::NoConfigFound {
+                system_path: self.system_path.clone(),
+                user_path: self.user_path.clone(),
+            });
         }
 
         // Apply CLI flags (highest priority)
@@ -159,79 +170,6 @@ impl ConfigLoader {
         }
 
         Ok(config)
-    }
-
-    /// Load a tool profile by name.
-    ///
-    /// Resolution order:
-    /// 1. If `profile_override` is provided, use that profile name
-    /// 2. Try to find an embedded profile matching the tool name
-    /// 3. Try to load from user config directory (`~/.config/secure-llm/profiles/<name>.toml`)
-    /// 4. Try to load from system directory (`/etc/secure-llm/profiles/<name>.toml`)
-    /// 5. If the tool name looks like a path, use the tool name as-is and create a minimal profile
-    pub fn load_profile(
-        &self,
-        tool: &str,
-        profile_override: Option<&str>,
-    ) -> Result<ToolProfile, ConfigError> {
-        let profile_name = profile_override.unwrap_or(tool);
-
-        // Try embedded profile first
-        if let Some(embedded) = ToolProfile::get_embedded(profile_name) {
-            let profile: ToolProfile =
-                toml::from_str(embedded).map_err(|e| ConfigError::ParseError {
-                    path: PathBuf::from(format!("<embedded:{}>", profile_name)),
-                    source: e,
-                })?;
-            debug!("Using embedded profile for '{}'", profile_name);
-            return Ok(profile);
-        }
-
-        // Try user profiles directory
-        let user_profile_path = self
-            .user_path
-            .parent()
-            .map(|p| p.join("profiles").join(format!("{}.toml", profile_name)));
-
-        if let Some(ref path) = user_profile_path
-            && let Some(profile) = self.load_profile_file(path)?
-        {
-            debug!("Loaded user profile from {:?}", path);
-            return Ok(profile);
-        }
-
-        // Try system profiles directory
-        let system_profile_path = PathBuf::from("/etc/secure-llm/profiles")
-            .join(format!("{}.toml", profile_name));
-
-        if let Some(profile) = self.load_profile_file(&system_profile_path)? {
-            debug!("Loaded system profile from {:?}", system_profile_path);
-            return Ok(profile);
-        }
-
-        // If the tool looks like a path (contains / or exists), create a minimal profile
-        if tool.contains('/') || PathBuf::from(tool).exists() {
-            debug!("Creating minimal profile for path-based tool: {}", tool);
-            return Ok(ToolProfile {
-                tool: super::profiles::ToolInfo {
-                    name: tool.to_string(),
-                    display_name: tool.to_string(),
-                    binary: tool.to_string(),
-                    description: format!("Custom tool: {}", tool),
-                },
-                environment: Default::default(),
-                network: Default::default(),
-                proxy: Default::default(),
-            });
-        }
-
-        // No profile found
-        warn!(
-            "No profile found for '{}'. Available built-in profiles: {:?}",
-            profile_name,
-            ToolProfile::builtin_names()
-        );
-        Err(ConfigError::UnknownProfile(profile_name.to_string()))
     }
 
     /// Load the user's persistent allowlist.
@@ -353,24 +291,6 @@ impl ConfigLoader {
         }
     }
 
-    /// Load a profile file, returning None if it doesn't exist.
-    fn load_profile_file(&self, path: &PathBuf) -> Result<Option<ToolProfile>, ConfigError> {
-        match fs::read_to_string(path) {
-            Ok(contents) => {
-                let profile: ToolProfile =
-                    toml::from_str(&contents).map_err(|e| ConfigError::ParseError {
-                        path: path.clone(),
-                        source: e,
-                    })?;
-                Ok(Some(profile))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(ConfigError::ReadError {
-                path: path.clone(),
-                source: e,
-            }),
-        }
-    }
 }
 
 impl Default for ConfigLoader {
@@ -392,24 +312,26 @@ mod tests {
             publish: vec![],
             allow_domains: vec![],
             config: None,
-            profile: None,
             headless: false,
             verbose: 0,
         }
     }
 
-    #[test]
-    fn test_default_config_is_valid() {
-        let loader = ConfigLoader::new();
-        let cli = create_test_cli();
-        let config = loader.load(&cli).unwrap();
+    /// Create a minimal valid config file for testing.
+    fn write_minimal_config(dir: &std::path::Path, filename: &str) {
+        let config = r#"
+            [general]
+            prompt_timeout = 30
+            log_level = "info"
 
-        assert!(!config.network.allowlist.is_empty());
-        assert_eq!(config.general.prompt_timeout, 30);
+            [network]
+            allowlist = ["pypi.org"]
+        "#;
+        fs::write(dir.join(filename), config).unwrap();
     }
 
     #[test]
-    fn test_missing_files_use_defaults() {
+    fn test_no_config_returns_error() {
         let dir = tempdir().unwrap();
         let loader = ConfigLoader::with_paths(
             dir.path().join("nonexistent_system.toml"),
@@ -418,11 +340,11 @@ mod tests {
         );
 
         let cli = create_test_cli();
-        let config = loader.load(&cli).unwrap();
+        let result = loader.load(&cli);
 
-        // Should still have defaults
-        assert!(!config.network.allowlist.is_empty());
-        assert!(config.network.allowlist.contains(&"pypi.org".to_string()));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ConfigError::NoConfigFound { .. }));
     }
 
     #[test]
@@ -460,6 +382,13 @@ mod tests {
     fn test_lists_are_merged() {
         let dir = tempdir().unwrap();
 
+        // Create system config with initial allowlist
+        let system_config = r#"
+            [network]
+            allowlist = ["pypi.org"]
+        "#;
+        fs::write(dir.path().join("system.toml"), system_config).unwrap();
+
         // Create user config with additional allowlist
         let user_config = r#"
             [network]
@@ -468,7 +397,7 @@ mod tests {
         fs::write(dir.path().join("user.toml"), user_config).unwrap();
 
         let loader = ConfigLoader::with_paths(
-            dir.path().join("nonexistent.toml"),
+            dir.path().join("system.toml"),
             dir.path().join("user.toml"),
             dir.path().join("allowlist.toml"),
         );
@@ -476,7 +405,7 @@ mod tests {
         let cli = create_test_cli();
         let config = loader.load(&cli).unwrap();
 
-        // Both default allowlist entries and user entries should be present
+        // Both system and user entries should be present
         assert!(config.network.allowlist.contains(&"pypi.org".to_string()));
         assert!(config.network.allowlist.contains(&"custom.example.com".to_string()));
     }
@@ -484,6 +413,8 @@ mod tests {
     #[test]
     fn test_cli_domains_are_added() {
         let dir = tempdir().unwrap();
+        write_minimal_config(dir.path(), "system.toml");
+
         let loader = ConfigLoader::with_paths(
             dir.path().join("system.toml"),
             dir.path().join("user.toml"),
@@ -521,47 +452,6 @@ mod tests {
     }
 
     #[test]
-    fn test_embedded_profiles_parse() {
-        let loader = ConfigLoader::new();
-
-        for name in ToolProfile::builtin_names() {
-            let profile = loader.load_profile(name, None).unwrap();
-            assert_eq!(profile.tool.name, *name);
-        }
-    }
-
-    #[test]
-    fn test_unknown_profile_returns_error() {
-        let dir = tempdir().unwrap();
-        let loader = ConfigLoader::with_paths(
-            dir.path().join("system.toml"),
-            dir.path().join("user.toml"),
-            dir.path().join("allowlist.toml"),
-        );
-
-        let result = loader.load_profile("unknown-tool", None);
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, ConfigError::UnknownProfile(_)));
-    }
-
-    #[test]
-    fn test_path_based_tool_creates_minimal_profile() {
-        let dir = tempdir().unwrap();
-        let loader = ConfigLoader::with_paths(
-            dir.path().join("system.toml"),
-            dir.path().join("user.toml"),
-            dir.path().join("allowlist.toml"),
-        );
-
-        // Tool name that looks like a path
-        let profile = loader.load_profile("/usr/local/bin/custom-tool", None).unwrap();
-
-        assert_eq!(profile.tool.binary, "/usr/local/bin/custom-tool");
-    }
-
-    #[test]
     fn test_save_and_load_allowlist() {
         let dir = tempdir().unwrap();
         let loader = ConfigLoader::with_paths(
@@ -576,17 +466,6 @@ mod tests {
         // Load it back
         let allowlist = loader.load_user_allowlist().unwrap();
         assert!(allowlist.domains.allowed.contains(&"test.example.com".to_string()));
-    }
-
-    #[test]
-    fn test_profile_override() {
-        let loader = ConfigLoader::new();
-
-        // Request claude but override with cursor profile
-        let profile = loader.load_profile("claude", Some("cursor")).unwrap();
-
-        // Should get cursor profile, not claude
-        assert_eq!(profile.tool.name, "cursor");
     }
 
     #[test]
@@ -630,6 +509,8 @@ mod tests {
     #[test]
     fn test_blocklist_loaded_into_config() {
         let dir = tempdir().unwrap();
+        write_minimal_config(dir.path(), "system.toml");
+
         let loader = ConfigLoader::with_paths(
             dir.path().join("system.toml"),
             dir.path().join("user.toml"),
@@ -663,5 +544,82 @@ mod tests {
         loader.remove_from_blocklist("temp.example.com").unwrap();
         let allowlist = loader.load_user_allowlist().unwrap();
         assert!(!allowlist.domains.blocked.contains(&"temp.example.com".to_string()));
+    }
+
+    #[test]
+    fn test_tools_loaded_from_config() {
+        let dir = tempdir().unwrap();
+
+        let config = r#"
+            [tools.claude]
+            binary = "claude"
+            display_name = "Claude Code"
+            allowlist = ["*.anthropic.com"]
+            bind_rw = ["$HOME"]
+
+            [tools.cursor]
+            binary = "cursor"
+        "#;
+        fs::write(dir.path().join("config.toml"), config).unwrap();
+
+        let loader = ConfigLoader::with_paths(
+            dir.path().join("config.toml"),
+            dir.path().join("user.toml"),
+            dir.path().join("allowlist.toml"),
+        );
+
+        let cli = create_test_cli();
+        let config = loader.load(&cli).unwrap();
+
+        assert!(config.tools.contains_key("claude"));
+        assert!(config.tools.contains_key("cursor"));
+
+        let claude = config.tools.get("claude").unwrap();
+        assert_eq!(claude.binary, "claude");
+        assert_eq!(claude.display_name, Some("Claude Code".to_string()));
+        assert!(claude.allowlist.contains(&"*.anthropic.com".to_string()));
+        assert!(claude.bind_rw.contains(&"$HOME".to_string()));
+    }
+
+    #[test]
+    fn test_tools_merged_across_configs() {
+        let dir = tempdir().unwrap();
+
+        // System config with base tool config
+        let system_config = r#"
+            [tools.claude]
+            binary = "claude"
+            allowlist = ["*.anthropic.com"]
+        "#;
+        fs::write(dir.path().join("system.toml"), system_config).unwrap();
+
+        // User config extends the tool
+        let user_config = r#"
+            [tools.claude]
+            display_name = "Claude Code"
+            allowlist = ["extra.com"]
+            bind_rw = ["$HOME"]
+        "#;
+        fs::write(dir.path().join("user.toml"), user_config).unwrap();
+
+        let loader = ConfigLoader::with_paths(
+            dir.path().join("system.toml"),
+            dir.path().join("user.toml"),
+            dir.path().join("allowlist.toml"),
+        );
+
+        let cli = create_test_cli();
+        let config = loader.load(&cli).unwrap();
+
+        let claude = config.tools.get("claude").unwrap();
+        // Binary should come from system
+        assert_eq!(claude.binary, "claude");
+        // Display name from user
+        assert_eq!(claude.display_name, Some("Claude Code".to_string()));
+        // Allowlists should be merged
+        assert!(claude.allowlist.contains(&"*.anthropic.com".to_string()));
+        assert!(claude.allowlist.contains(&"extra.com".to_string()));
+        // Bind mounts from user
+        assert!(claude.bind_rw.contains(&"$HOME".to_string()));
     }
 }
